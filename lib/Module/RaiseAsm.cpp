@@ -37,8 +37,13 @@ char RaiseAsmPass::ID = 0;
 
 Function *RaiseAsmPass::getIntrinsic(llvm::Module &M, unsigned IID, Type **Tys,
                                      unsigned NumTys) {
+#if LLVM_VERSION_CODE >= LLVM_VERSION(22, 0)
+  return Intrinsic::getOrInsertDeclaration(
+      &M, (llvm::Intrinsic::ID)IID, llvm::ArrayRef<llvm::Type *>(Tys, NumTys));
+#else
   return Intrinsic::getDeclaration(&M, (llvm::Intrinsic::ID) IID,
                                    llvm::ArrayRef<llvm::Type*>(Tys, NumTys));
+#endif
 }
 
 // FIXME: This should just be implemented as a patch to
@@ -57,8 +62,10 @@ bool RaiseAsmPass::runOnInstruction(Module &M, Instruction *I) {
   if (!TLI)
     return false;
 
+#if LLVM_VERSION_CODE < LLVM_VERSION(22, 0)
   if (TLI->ExpandInlineAsm(ci))
     return true;
+#endif
 
   if ((triple.getArch() == llvm::Triple::x86 ||
        triple.getArch() == llvm::Triple::x86_64) &&
@@ -81,10 +88,17 @@ bool RaiseAsmPass::runOnModule(Module &M) {
   std::string Err;
 
   // Use target triple from the module if possible.
+#if LLVM_VERSION_CODE >= LLVM_VERSION(22, 0)
+  llvm::Triple TargetTriple = M.getTargetTriple();
+  if (TargetTriple.empty())
+    TargetTriple = llvm::Triple(llvm::sys::getDefaultTargetTriple());
+  const Target *Target = TargetRegistry::lookupTarget(TargetTriple, Err);
+#else
   std::string TargetTriple = M.getTargetTriple();
   if (TargetTriple.empty())
     TargetTriple = llvm::sys::getDefaultTargetTriple();
   const Target *Target = TargetRegistry::lookupTarget(TargetTriple, Err);
+#endif
 
   TargetMachine * TM = 0;
   if (Target == 0) {
@@ -101,7 +115,11 @@ bool RaiseAsmPass::runOnModule(Module &M) {
 
     TLI = TM->getSubtargetImpl(*(M.begin()))->getTargetLowering();
 
+#if LLVM_VERSION_CODE >= LLVM_VERSION(22, 0)
+    triple = TargetTriple;
+#else
     triple = llvm::Triple(TargetTriple);
+#endif
   }
 
   for (Module::iterator fi = M.begin(), fe = M.end(); fi != fe; ++fi) {

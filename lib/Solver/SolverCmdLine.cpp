@@ -114,11 +114,16 @@ cl::opt<bool> UseAssignmentValidatingSolver(
 
 void KCommandLine::KeepOnlyCategories(
     std::set<llvm::cl::OptionCategory *> const &categories) {
-  StringMap<cl::Option *> &map = cl::getRegisteredOptions();
+  auto &map = cl::getRegisteredOptions();
 
   for (auto &elem : map) {
-    if (elem.first() == "version" || elem.first() == "color" ||
-        elem.first() == "help"    || elem.first() == "help-list")
+#if LLVM_VERSION_CODE >= LLVM_VERSION(22, 0)
+    StringRef optionName = elem.first;
+#else
+    StringRef optionName = elem.first();
+#endif
+    if (optionName == "version" || optionName == "color" ||
+        optionName == "help"    || optionName == "help-list")
       continue;
 
     bool keep = false;

@@ -1345,7 +1345,11 @@ int main(int argc, char **argv, char **envp) {
 
   llvm::Module *mainModule = M.get();
 
-  const std::string &module_triple = mainModule->getTargetTriple();
+#if LLVM_VERSION_CODE >= LLVM_VERSION(22, 0)
+  std::string module_triple = mainModule->getTargetTriple().str();
+#else
+  std::string module_triple = mainModule->getTargetTriple();
+#endif
   std::string host_triple = llvm::sys::getDefaultTargetTriple();
 
   if (module_triple != host_triple)

@@ -4911,7 +4911,15 @@ size_t Executor::getAllocationAlignment(const llvm::Value *allocSite) const {
   llvm::Type *type = NULL;
   std::string allocationSiteName(allocSite->getName().str());
   if (const GlobalObject *GO = dyn_cast<GlobalObject>(allocSite)) {
+#if LLVM_VERSION_CODE >= LLVM_VERSION(22, 0)
+    if (const GlobalVariable *globalVar = dyn_cast<GlobalVariable>(GO)) {
+      alignment = globalVar->getAlignment();
+    } else if (const Function *function = dyn_cast<Function>(GO)) {
+      alignment = function->getAlign().valueOrOne().value();
+    }
+#else
     alignment = GO->getAlignment();
+#endif
     if (const GlobalVariable *globalVar = dyn_cast<GlobalVariable>(GO)) {
       // All GlobalVariables's have pointer type
       assert(globalVar->getType()->isPointerTy() &&

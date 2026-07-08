@@ -119,7 +119,7 @@ void runFinalKleeCleanup(Module &M, SwitchImplType SwitchType) {
     }
   }
 
-  DataLayout targetData(&M);
+  DataLayout targetData(M.getDataLayout());
   IntrinsicCleanerPass(targetData).runOnModule(M);
 
   FunctionPassManager ScalarizerFPM;
@@ -168,7 +168,7 @@ void klee::optimizeModule(llvm::Module *M,
       StringRef GVName = GV.getName();
 
       for (const char *fun : preservedFunctions)
-        if (GVName.equals(fun))
+        if (GVName == fun)
           return true;
 
       return false;

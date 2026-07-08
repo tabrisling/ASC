@@ -82,6 +82,6 @@ void klee::instrument(bool CheckDivZero, bool CheckOvershift,
   if (CheckOvershift)
     OvershiftCheckPass().runOnModule(*module);
 
-  llvm::DataLayout targetData(module);
+  llvm::DataLayout targetData(module->getDataLayout());
   IntrinsicCleanerPass(targetData).runOnModule(*module);
 }
