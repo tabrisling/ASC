@@ -209,18 +209,84 @@ def suite_intrinsics(suite: dict[str, Any]) -> set[str]:
     covered: set[str] = set()
     for section in ("asc_cases", "lowered_cases", "simulator_cases"):
         for case in suite.get(section, []):
-            for name in case.get("intrinsics", []):
-                covered.add(name if name.startswith("@") else "@" + name)
-            op = case.get("op", "vadd")
-            if op in SUITE_OP_INTRINSICS:
-                entry = SUITE_OP_INTRINSICS[op]
-                if isinstance(entry, dict):
-                    mode = case.get("mode", "x")
-                    if mode in entry:
-                        covered.add(entry[mode])
-                else:
-                    covered.add(entry)
+            covered.update(case_intrinsics(case))
     return covered
+
+
+def case_intrinsics(case: dict[str, Any]) -> set[str]:
+    names = {
+        name if name.startswith("@") else "@" + name
+        for name in case.get("intrinsics", [])
+    }
+    op = case.get("op", "vadd")
+    if op == "vrec" and case.get("decompose_vrec"):
+        return names
+    if op in SUITE_OP_INTRINSICS:
+        entry = SUITE_OP_INTRINSICS[op]
+        if isinstance(entry, dict):
+            mode = case.get("mode", "x")
+            if mode in entry:
+                names.add(entry[mode])
+        else:
+            names.add(entry)
+    return names
+
+
+def suite_evidence(suite: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
+    evidence: dict[str, dict[str, list[str]]] = {}
+    sections = (
+        ("asc_cases", "asc"),
+        ("lowered_cases", "asc"),
+        ("simulator_cases", "simulator"),
+    )
+    for section, domain in sections:
+        for case in suite.get(section, []):
+            status_key = "expect_simulator_status" if domain == "simulator" else "expect_asc_status"
+            expected = case.get(status_key, "pass")
+            outcome = "pass" if expected == "pass" else "error"
+            bucket = f"{domain}_{outcome}"
+            for name in case_intrinsics(case):
+                item = evidence.setdefault(
+                    name,
+                    {
+                        "asc_pass": [],
+                        "asc_error": [],
+                        "simulator_pass": [],
+                        "simulator_error": [],
+                    },
+                )
+                item[bucket].append(case["name"])
+    return evidence
+
+
+def compact_evidence(evidence: dict[str, list[str]]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for bucket, cases in evidence.items():
+        if cases:
+            compact[bucket] = {"count": len(cases), "cases": cases[:8]}
+    return compact
+
+
+def oracle_status(model: str, evidence: dict[str, list[str]] | None) -> str:
+    if not evidence:
+        return "missing"
+    asc_pass = bool(evidence["asc_pass"])
+    asc_error = bool(evidence["asc_error"])
+    simulator_pass = bool(evidence["simulator_pass"])
+    simulator_error = bool(evidence["simulator_error"])
+    if model == "supported":
+        if asc_pass and simulator_pass:
+            return "pass-oracle"
+        if asc_pass:
+            return "asc-pass-only"
+        return "covered"
+    if asc_error and simulator_error:
+        return "fail-closed"
+    if asc_error:
+        return "asc-error-only"
+    if simulator_error:
+        return "simulator-error-only"
+    return "covered-unsupported"
 
 
 def report(inventory: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -229,12 +295,16 @@ def report(inventory: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "total": len(items),
         "supported": sum(1 for item in items if item["model"] == "supported"),
         "unsupported": sum(1 for item in items if item["model"] != "supported"),
+        "oracle_covered": sum(1 for item in items if item.get("oracle") not in (None, "missing")),
+        "fail_closed": sum(1 for item in items if item.get("oracle") == "fail-closed"),
         "by_priority": {},
         "by_category": {},
+        "by_oracle": {},
     }
     for item in items:
         summary["by_priority"][item["priority"]] = summary["by_priority"].get(item["priority"], 0) + 1
         summary["by_category"][item["category"]] = summary["by_category"].get(item["category"], 0) + 1
+        summary["by_oracle"][item["oracle"]] = summary["by_oracle"].get(item["oracle"], 0) + 1
     return {"summary": summary, "intrinsics": items}
 
 
@@ -246,36 +316,63 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--suite", type=Path, default=default_suite)
     parser.add_argument("--json", type=Path, help="write full JSON report")
     parser.add_argument("--fail-on-p0-unsupported", action="store_true")
+    parser.add_argument(
+        "--fail-on-p0-missing-oracle",
+        action="store_true",
+        help="fail if a P0 intrinsic has no ASC/simulator oracle evidence",
+    )
     args = parser.parse_args(argv)
 
     inventory = discover_intrinsics(args.opentileas_repo.resolve())
     suite = load_json(args.suite.resolve())
     covered = suite_intrinsics(suite)
+    evidence = suite_evidence(suite)
     for name in covered:
         if name in inventory:
             inventory[name]["suite"] = "covered"
+    for name, item in inventory.items():
+        item_evidence = evidence.get(name)
+        item["oracle"] = oracle_status(item["model"], item_evidence)
+        item["evidence"] = compact_evidence(item_evidence) if item_evidence else {}
     data = report(inventory)
     summary = data["summary"]
     print(
         "intrinsic coverage: "
         f"{summary['supported']}/{summary['total']} model-supported, "
-        f"{summary['unsupported']} unsupported"
+        f"{summary['unsupported']} unsupported, "
+        f"{summary['oracle_covered']} oracle-covered, "
+        f"{summary['fail_closed']} fail-closed"
     )
     print(f"by priority: {summary['by_priority']}")
     print(f"by category: {summary['by_category']}")
+    print(f"by oracle: {summary['by_oracle']}")
     p0_missing = [
         item for item in data["intrinsics"]
         if item["priority"] == "P0" and item["model"] != "supported"
     ]
+    p0_missing_oracle = [
+        item for item in data["intrinsics"]
+        if item["priority"] == "P0" and item["oracle"] == "missing"
+    ]
     if p0_missing:
         print("[P0 unsupported]")
         for item in p0_missing[:80]:
-            print(f"  {item['intrinsic']} ({item['category']})")
+            print(f"  {item['intrinsic']} ({item['category']}, {item['oracle']})")
         if len(p0_missing) > 80:
             print(f"  ... {len(p0_missing) - 80} more")
+    if p0_missing_oracle:
+        print("[P0 missing oracle]")
+        for item in p0_missing_oracle[:80]:
+            print(f"  {item['intrinsic']} ({item['category']})")
+        if len(p0_missing_oracle) > 80:
+            print(f"  ... {len(p0_missing_oracle) - 80} more")
     if args.json:
         args.json.resolve().write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return 1 if args.fail_on_p0_unsupported and p0_missing else 0
+    if args.fail_on_p0_unsupported and p0_missing:
+        return 1
+    if args.fail_on_p0_missing_oracle and p0_missing_oracle:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
