@@ -266,7 +266,7 @@ def case_intrinsics(case: dict[str, Any], *, include_suite_op: bool = True) -> s
         name if name.startswith("@") else "@" + name
         for name in case.get("intrinsics", [])
     }
-    if not include_suite_op:
+    if not include_suite_op or case.get("suite_op") is False:
         return names
     op = case.get("op", "vadd")
     if op == "vrec" and case.get("decompose_vrec"):

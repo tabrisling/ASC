@@ -777,6 +777,28 @@ def patch_mask_patterns(ir_text: str, case_cfg: dict[str, Any]) -> str:
 
 
 def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
+    if generated == "f16_vadd_128":
+        a = [f16((idx - 64) / 4.0) for idx in range(128)]
+        b = [f16((idx % 17) / 8.0 - 1.0) for idx in range(128)]
+        golden = [f16(x + y) for x, y in zip(a, b)]
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "add_kernel",
+                "arguments": {"%0": "x", "%1": "y", "%2": "output"},
+                "scalars": {"%3": 128},
+                "buffers": {
+                    "x": {"space": "gm", "dtype": "f16", "values": a},
+                    "y": {"space": "gm", "dtype": "f16", "values": b},
+                    "output": {"space": "gm", "dtype": "f16", "size": 128},
+                },
+                "ub_dtype": "f16",
+                "ub_size_bytes": 768,
+                "dma_bytes": 256,
+                "checks": [{"buffer": "output", "golden": golden, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
     if generated == "f16_roundtrip_128":
         values = [f16((idx - 64) / 4.0) for idx in range(128)]
         case_json.clear()
@@ -1060,7 +1082,7 @@ def verify_materialized_ir(case_cfg: dict[str, Any], source_path: Path) -> None:
         if expected not in text:
             raise RuntimeError(f"{case_cfg['name']}: materialized IR missing {expected}")
         return
-    if "intrinsics" in case_cfg and case_cfg.get("op") is None:
+    if "intrinsics" in case_cfg and ("ir" in case_cfg or case_cfg.get("op") is None):
         for expected in (
             name if name.startswith("@") else "@" + name
             for name in case_cfg["intrinsics"]
@@ -1193,9 +1215,19 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
     shutil.copytree(source, target)
     runner_path = target / case_cfg.get("config", "runner.json")
     runner = load_json(runner_path)
+    simulator_dtype = case_cfg.get("simulator_dtype")
+    simulator_shape = int(case_cfg.get("simulator_shape", case_cfg.get("n_elements", 1024)))
     for arg in runner.get("args", []):
         if arg.get("name") == "n_elements":
             arg["value"] = int(case_cfg["n_elements"])
+        if simulator_dtype and arg.get("kind") in ("input", "output") and arg.get("dtype") in (
+            "float32",
+            "float16",
+        ):
+            arg["dtype"] = simulator_dtype
+            arg["shape"] = [simulator_shape]
+            if arg.get("kind") == "output":
+                arg["path"] = arg.get("path", "output.npy")
     if case_cfg.get("op") == "vexpdif":
         golden_spec = runner.setdefault("golden", {})
         golden_spec["atol"] = float(case_cfg.get("golden_atol", 1e-5))
@@ -1213,11 +1245,13 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 f"EXTRACT = {int(case_cfg.get('extract', 0))!r}",
                 f"MASK_PATTERN = {int(case_cfg.get('mask_pattern', 0))!r}",
                 f"STORE_MASK_PATTERN = {int(case_cfg.get('store_mask_pattern', case_cfg.get('mask_pattern', 0)))!r}",
+                f"VECTOR_LANES = {int(case_cfg.get('vector_lanes', 64))!r}",
+                f"OUTPUT_DTYPE = np.dtype({case_cfg.get('simulator_dtype', 'float32')!r})",
                 "SCALAR = 2.0 if OP != 'vdups' else 3.5",
                 "",
                 "",
                 "def _active_lanes(pattern: int) -> int:",
-                "    return {0: 64, 5: 4, 6: 8, 7: 16, 8: 32, 9: 64}[int(pattern)]",
+                "    return {0: VECTOR_LANES, 5: 4, 6: 8, 7: 16, 8: 32, 9: 64}[int(pattern)]",
                 "",
                 "",
                 "def _apply(x: np.ndarray, y: np.ndarray) -> np.ndarray:",
@@ -1279,12 +1313,12 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "",
                 "def add(x: np.ndarray, y: np.ndarray, n_elements: int) -> np.ndarray:",
                 "    n = max(0, min(int(n_elements), x.shape[0]))",
-                "    out = np.zeros_like(x, dtype=np.float32)",
-                "    computed = _apply(x[:n], y[:n]).astype(np.float32)",
+                "    out = np.zeros_like(x, dtype=OUTPUT_DTYPE)",
+                "    computed = _apply(x[:n], y[:n]).astype(OUTPUT_DTYPE)",
                 "    compute_active = _active_lanes(MASK_PATTERN)",
                 "    store_active = _active_lanes(STORE_MASK_PATTERN)",
                 "    for idx in range(n):",
-                "        lane = idx % 64",
+                "        lane = idx % VECTOR_LANES",
                 "        if lane >= store_active:",
                 "            continue",
                 "        if OP == 'vsel':",
@@ -1308,7 +1342,7 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "            out[idx] = x[idx]",
                 "        else:",
                 "            out[idx] = np.float32(0.0)",
-                "    return out.astype(np.float32)",
+                "    return out.astype(OUTPUT_DTYPE)",
                 "",
             ]
         ),
