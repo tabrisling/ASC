@@ -29,6 +29,7 @@ I8_BYTES = 1
 VECTOR_BYTES_V64F32 = LANES_F32_V64 * F32_BYTES
 VECTOR_BYTES_V128F16 = LANES_F16_V128 * F16_BYTES
 PREDICATE_BYTES_B8 = 32
+B8_FULL_ACTIVE_STORED_BYTES = 2
 GM_ADDRSPACE = 1
 UB_ADDRSPACE = 6
 ALIGNMENT_BYTES = 32
@@ -451,13 +452,22 @@ class DavVAddSim:
             return self.buffers["__ub_f32"]
         raise SimError("UB buffer is missing")
 
-    def _check_region(self, buf: Buffer, byte_offset: int, byte_count: int, op: str) -> int:
+    def _check_region(
+        self,
+        buf: Buffer,
+        byte_offset: int,
+        byte_count: int,
+        op: str,
+        alignment: int = ALIGNMENT_BYTES,
+    ) -> int:
         if byte_offset < 0:
             raise SimError(f"{op} on {buf.name}: negative byte offset {byte_offset}")
-        if byte_offset % ALIGNMENT_BYTES != 0:
+        if alignment <= 0:
+            raise SimError(f"{op} on {buf.name}: invalid alignment {alignment}")
+        if byte_offset % alignment != 0:
             raise SimError(
                 f"{op} on {buf.name}: byte offset {byte_offset} is not "
-                f"{ALIGNMENT_BYTES}-byte aligned"
+                f"{alignment}-byte aligned"
             )
         element_bytes = dtype_bytes(buf.dtype)
         if byte_offset % element_bytes != 0:
@@ -602,6 +612,16 @@ class DavVAddSim:
         name = call.group(2)
         args = [parse_typed_value(a) for a in split_args(call.group(3))]
 
+        if name == "@llvm.hivm.pset.b8":
+            if lhs is None:
+                raise SimError("pset result is unused")
+            pattern = self._as_int(args[0], "pset pattern")
+            if pattern != 0:
+                raise SimError("pset.b8 milestone supports full-active pattern 0 only")
+            self.values[lhs] = self._predicate_b8_full_active()
+            self.trace.append(f"{lhs} = pset.b8({pattern})")
+            return
+
         if name in ("@llvm.hivm.pset.b32", "@llvm.hivm.pset.b16"):
             if lhs is None:
                 raise SimError("pset result is unused")
@@ -661,6 +681,12 @@ class DavVAddSim:
 
         if name == "@llvm.hivm.BARRIER":
             self.trace.append(f"BARRIER({args[0].value})")
+            return
+
+        if name == "@llvm.hivm.mem.bar.vv.all":
+            if args:
+                raise SimError(f"{name}: expected 0 args, got {len(args)}")
+            self.trace.append("mem.bar.vv.all()")
             return
 
         if name in (
@@ -738,23 +764,30 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = vldsx1.f16(UB, byte_offset={base_byte + byte_offset})")
             return
 
-        if name == "@llvm.hivm.plds.b8":
+        if name in ("@llvm.hivm.plds.b8", "@llvm.hivm.pldi.b8"):
             if lhs is None:
-                raise SimError("plds result is unused")
+                raise SimError(f"{name.rsplit('.', 1)[-1]} result is unused")
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
             buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u8")
             if buf.dtype not in ("u8", "s8"):
                 raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
-            byte_offset = self._as_int(args[1], "plds byte offset")
-            dist = self._as_int(args[2], "plds dist")
-            postupdate = self._as_int(args[3], "plds postupdate")
+            op_label = name.rsplit(".", 2)[-2] + ".b8"
+            byte_offset = self._as_int(args[1], f"{op_label} byte offset")
+            dist = self._as_int(args[2], f"{op_label} dist")
+            postupdate = self._as_int(args[3], f"{op_label} postupdate")
             if dist != 0 or postupdate != 0:
-                raise SimError("plds.b8 milestone supports dist=0 and postupdate=0 only")
-            start = self._check_region(buf, base_byte + byte_offset, PREDICATE_BYTES_B8, "plds.b8")
+                raise SimError(f"{op_label} milestone supports dist=0 and postupdate=0 only")
+            start = self._check_region(
+                buf,
+                base_byte + byte_offset,
+                PREDICATE_BYTES_B8,
+                op_label,
+                alignment=1,
+            )
             values = [int(x) & 0xFF for x in buf.values[start : start + PREDICATE_BYTES_B8]]
             self.values[lhs] = PredicateBytes(values)
-            self.trace.append(f"{lhs} = plds.b8(UB, byte_offset={base_byte + byte_offset})")
+            self.trace.append(f"{lhs} = {op_label}(UB, byte_offset={base_byte + byte_offset})")
             return
 
         if name in BINARY_VECTOR_OPS:
@@ -967,22 +1000,29 @@ class DavVAddSim:
             self.trace.append(f"vstsx1.f16({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
             return
 
-        if name == "@llvm.hivm.psts.b8":
+        if name in ("@llvm.hivm.psts.b8", "@llvm.hivm.psti.b8"):
             if len(args) != 5:
                 raise SimError(f"{name}: expected 5 args, got {len(args)}")
-            pred = self._as_predicate_bytes(args[0], "psts predicate")
+            op_label = name.rsplit(".", 2)[-2] + ".b8"
+            pred = self._as_predicate_bytes(args[0], f"{op_label} predicate")
             buf, base_byte = self._resolve_pointer(args[1], "ub", preferred_dtype="u8")
             if buf.dtype not in ("u8", "s8"):
                 raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
-            byte_offset = self._as_int(args[2], "psts byte offset")
-            dist = self._as_int(args[3], "psts dist")
-            postupdate = self._as_int(args[4], "psts postupdate")
+            byte_offset = self._as_int(args[2], f"{op_label} byte offset")
+            dist = self._as_int(args[3], f"{op_label} dist")
+            postupdate = self._as_int(args[4], f"{op_label} postupdate")
             if dist != 0 or postupdate != 0:
-                raise SimError("psts.b8 milestone supports dist=0 and postupdate=0 only")
-            start = self._check_region(buf, base_byte + byte_offset, PREDICATE_BYTES_B8, "psts.b8")
+                raise SimError(f"{op_label} milestone supports dist=0 and postupdate=0 only")
+            start = self._check_region(
+                buf,
+                base_byte + byte_offset,
+                PREDICATE_BYTES_B8,
+                op_label,
+                alignment=1,
+            )
             for idx, value in enumerate(pred.values):
                 buf.values[start + idx] = round_dtype(value, buf.dtype)
-            self.trace.append(f"psts.b8({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
+            self.trace.append(f"{op_label}({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
             return
 
         self.unsupported.append(name)
@@ -1146,6 +1186,11 @@ class DavVAddSim:
         else:
             raise SimError(f"unsupported reduction op {op_label}")
         return [result] + [0.0] * (LANES_F32_V64 - 1)
+
+    def _predicate_b8_full_active(self) -> PredicateBytes:
+        values = [0] * PREDICATE_BYTES_B8
+        values[:B8_FULL_ACTIVE_STORED_BYTES] = [0xFF] * B8_FULL_ACTIVE_STORED_BYTES
+        return PredicateBytes(values)
 
     def _execute_scalar_or_pointer_line(self, line: str) -> bool:
         shufflevector = re.match(
