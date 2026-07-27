@@ -45,6 +45,7 @@ UNARY_VECTOR_OPS = {
     "@llvm.hivm.vrelu.x.v64f32": ("vrelu", lambda a: f32(max(a, 0.0))),
     "@llvm.hivm.vsqrt.x.v64f32": ("vsqrt", lambda a: f32_sqrt(a)),
     "@llvm.hivm.vexp.x.v64f32": ("vexp", lambda a: f32_exp(a)),
+    "@llvm.hivm.vln.x.v64f32": ("vln", lambda a: f32_ln(a)),
 }
 
 SCALAR_VECTOR_OPS = {
@@ -248,6 +249,16 @@ def f32_sqrt(value: float) -> float:
     if value < 0.0:
         return float("nan")
     return f32(math.sqrt(value))
+
+
+def f32_ln(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    if value < 0.0:
+        return float("nan")
+    if value == 0.0:
+        return float("-inf")
+    return f32(math.log(value))
 
 
 def f32_exp(value: float) -> float:

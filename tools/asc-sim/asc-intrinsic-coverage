@@ -37,6 +37,7 @@ MODEL_SUPPORTED = {
     "@llvm.hivm.vrelu.x.v64f32",
     "@llvm.hivm.vsqrt.x.v64f32",
     "@llvm.hivm.vexp.x.v64f32",
+    "@llvm.hivm.vln.x.v64f32",
     "@llvm.hivm.vadds.s.x.v64f32",
     "@llvm.hivm.vmuls.s.x.v64f32",
     "@llvm.hivm.vmaxs.s.x.v64f32",

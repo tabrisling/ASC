@@ -523,7 +523,7 @@
       "dma_bytes": 4096,
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "error"
+      "expect_asc_status": "pass"
     },
     {
       "name": "opentile_vector_expdif_lowered_n64_part0",
