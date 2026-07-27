@@ -2,8 +2,9 @@
 """Minimal dav LLVM intrinsic functional simulator.
 
 This is intentionally narrow: the first milestone supports a single vector add
-pipeline built from pset, vldsx1, vadd, and vstsx1. It is a fast local preflight
-tool for OpenTileAS-produced LLVM IR, not a cycle-accurate hardware simulator.
+pipeline with GM kernel arguments, explicit GM<->UB DMA, pset, vldsx1, vadd,
+and vstsx1. It is a fast local preflight tool for OpenTileAS-produced LLVM IR,
+not a cycle-accurate hardware simulator.
 """
 
 from __future__ import annotations
@@ -21,8 +22,10 @@ from typing import Any
 LANES_F32_V64 = 64
 F32_BYTES = 4
 VECTOR_BYTES_V64F32 = LANES_F32_V64 * F32_BYTES
+GM_ADDRSPACE = 1
 UB_ADDRSPACE = 6
 ALIGNMENT_BYTES = 32
+DEFAULT_UB_BYTES = 4096
 
 
 class SimError(RuntimeError):
@@ -78,6 +81,13 @@ def parse_typed_value(text: str) -> TypedValue:
     if m_space:
         addrspace = int(m_space.group(1))
 
+    if "null" in text and addrspace is not None:
+        return TypedValue(0, addrspace)
+
+    m_inttoptr = re.search(r"inttoptr\s*\(\s*i64\s+(-?\d+)\s+to\s+ptr", text)
+    if m_inttoptr:
+        return TypedValue(int(m_inttoptr.group(1)), addrspace)
+
     m_symbol = re.search(r"(%[-A-Za-z0-9_.$]+)\s*$", text)
     if m_symbol:
         return TypedValue(m_symbol.group(1), addrspace)
@@ -121,6 +131,16 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
                 raise SimError(f"buffer {name}: values longer than declared size")
             values = values + [0.0] * (size - len(values))
         buffers[name] = Buffer(name=name, values=values, dtype=dtype, space=space)
+    if "__ub" not in buffers:
+        ub_size_bytes = int(case.get("ub_size_bytes", DEFAULT_UB_BYTES))
+        if ub_size_bytes % F32_BYTES != 0:
+            raise SimError("ub_size_bytes must be divisible by 4 for the f32 milestone")
+        buffers["__ub"] = Buffer(
+            name="__ub",
+            values=[0.0] * (ub_size_bytes // F32_BYTES),
+            dtype="f32",
+            space="ub",
+        )
     return buffers
 
 
@@ -152,6 +172,8 @@ class DavVAddSim:
         self.values: dict[str, Any] = {}
         self.trace: list[str] = []
         self.unsupported: list[str] = []
+        self.flags: set[tuple[int, int, int]] = set()
+        self.dma_bytes = int(case.get("dma_bytes", VECTOR_BYTES_V64F32))
 
     def _build_pointer_bindings(self) -> dict[str, str]:
         explicit = self.case.get("arguments", {})
@@ -160,29 +182,32 @@ class DavVAddSim:
             name = explicit.get(symbol, symbol.lstrip("%"))
             if name not in self.buffers:
                 raise SimError(f"argument {symbol} maps to missing buffer {name!r}")
-            if addrspace is not None and addrspace != UB_ADDRSPACE:
+            if addrspace is not None and addrspace not in (GM_ADDRSPACE, UB_ADDRSPACE):
                 raise SimError(
                     f"argument {symbol} uses addrspace({addrspace}); "
-                    "only UB addrspace(6) is supported in the vadd milestone"
+                    "only GM addrspace(1) and UB addrspace(6) are supported"
                 )
             bindings[symbol] = name
         return bindings
 
-    def _buffer_for_ptr(self, ptr: TypedValue) -> Buffer:
-        if not isinstance(ptr.value, str):
-            raise SimError("pointer operand is not an SSA value")
-        if ptr.addrspace is not None and ptr.addrspace != UB_ADDRSPACE:
+    def _resolve_pointer(self, ptr: TypedValue, expected_space: str) -> tuple[Buffer, int]:
+        expected_addrspace = GM_ADDRSPACE if expected_space == "gm" else UB_ADDRSPACE
+        if ptr.addrspace is not None and ptr.addrspace != expected_addrspace:
             raise SimError(
-                f"pointer {ptr.value} uses addrspace({ptr.addrspace}); "
-                "only UB addrspace(6) is supported now"
+                f"pointer uses addrspace({ptr.addrspace}); expected "
+                f"addrspace({expected_addrspace}) for {expected_space}"
             )
+        if isinstance(ptr.value, int):
+            if expected_space != "ub":
+                raise SimError("integer pointer constants are only supported for UB")
+            return self.buffers["__ub"], ptr.value
         name = self.pointer_bindings.get(ptr.value)
         if not name:
             raise SimError(f"unbound pointer argument {ptr.value}")
         buf = self.buffers[name]
-        if buf.space != "ub":
-            raise SimError(f"buffer {name} is in {buf.space}; vadd milestone supports UB only")
-        return buf
+        if buf.space != expected_space:
+            raise SimError(f"buffer {name} is in {buf.space}; expected {expected_space}")
+        return buf, 0
 
     def _check_region(self, buf: Buffer, byte_offset: int, byte_count: int, op: str) -> int:
         if byte_offset < 0:
@@ -202,6 +227,20 @@ class DavVAddSim:
                 f"[{start}, {end}), buffer has {len(buf.values)}"
             )
         return start
+
+    def _copy_f32(
+        self,
+        src: Buffer,
+        src_byte_offset: int,
+        dst: Buffer,
+        dst_byte_offset: int,
+        byte_count: int,
+        op: str,
+    ) -> None:
+        src_start = self._check_region(src, src_byte_offset, byte_count, op + " read")
+        dst_start = self._check_region(dst, dst_byte_offset, byte_count, op + " write")
+        count = byte_count // F32_BYTES
+        dst.values[dst_start : dst_start + count] = src.values[src_start : src_start + count]
 
     def run(self) -> None:
         for raw in self.ir.splitlines():
@@ -238,20 +277,83 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = pset({pattern})")
             return
 
+        if name == "@llvm.hivm.GET.CTRL":
+            if lhs is None:
+                raise SimError("GET.CTRL result is unused")
+            self.values[lhs] = 0
+            self.trace.append(f"{lhs} = GET.CTRL()")
+            return
+
+        if name == "@llvm.hivm.SBITSET0":
+            if lhs is None:
+                raise SimError("SBITSET0 result is unused")
+            self.values[lhs] = self._as_int(args[0], "SBITSET0 value")
+            self.trace.append(f"{lhs} = SBITSET0({args[0].value}, {args[1].value})")
+            return
+
+        if name == "@llvm.hivm.SET.CTRL":
+            self.trace.append(f"SET.CTRL({args[0].value})")
+            return
+
+        if name == "@llvm.hivm.SET.FLAG.IMM":
+            flag = tuple(self._as_int(arg, "SET.FLAG.IMM argument") for arg in args)
+            if len(flag) != 3:
+                raise SimError("SET.FLAG.IMM expects 3 arguments")
+            self.flags.add(flag)
+            self.trace.append(f"SET.FLAG.IMM{flag}")
+            return
+
+        if name == "@llvm.hivm.WAIT.FLAG.IMM":
+            flag = tuple(self._as_int(arg, "WAIT.FLAG.IMM argument") for arg in args)
+            if len(flag) != 3:
+                raise SimError("WAIT.FLAG.IMM expects 3 arguments")
+            if flag not in self.flags:
+                raise SimError(f"WAIT.FLAG.IMM{flag} before matching SET.FLAG.IMM")
+            self.trace.append(f"WAIT.FLAG.IMM{flag}")
+            return
+
+        if name == "@llvm.hivm.BARRIER":
+            self.trace.append(f"BARRIER({args[0].value})")
+            return
+
+        if name == "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV":
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            dst, dst_base = self._resolve_pointer(args[0], "ub")
+            src, src_base = self._resolve_pointer(args[1], "gm")
+            self._copy_f32(src, src_base, dst, dst_base, self.dma_bytes, "MOV.OUT.TO.UB")
+            self.trace.append(
+                f"MOV.OUT.TO.UB {src.name}[0:{self.dma_bytes}] -> "
+                f"UB[{dst_base}:{dst_base + self.dma_bytes}]"
+            )
+            return
+
+        if name == "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV":
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            dst, dst_base = self._resolve_pointer(args[0], "gm")
+            src, src_base = self._resolve_pointer(args[1], "ub")
+            self._copy_f32(src, src_base, dst, dst_base, self.dma_bytes, "MOV.UB.TO.OUT")
+            self.trace.append(
+                f"MOV.UB.TO.OUT UB[{src_base}:{src_base + self.dma_bytes}] -> "
+                f"{dst.name}[0:{self.dma_bytes}]"
+            )
+            return
+
         if name == "@llvm.hivm.vldsx1.v64f32":
             if lhs is None:
                 raise SimError("vldsx1 result is unused")
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
-            buf = self._buffer_for_ptr(args[0])
+            buf, base_byte = self._resolve_pointer(args[0], "ub")
             byte_offset = self._as_int(args[1], "vldsx1 byte offset")
             norm = self._as_int(args[2], "vldsx1 norm")
             postupdate = self._as_int(args[3], "vldsx1 postupdate")
             if norm != 0 or postupdate != 0:
                 raise SimError("vldsx1 milestone supports norm=0 and postupdate=0 only")
-            start = self._check_region(buf, byte_offset, VECTOR_BYTES_V64F32, "vldsx1")
+            start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V64F32, "vldsx1")
             self.values[lhs] = list(buf.values[start : start + LANES_F32_V64])
-            self.trace.append(f"{lhs} = vldsx1({buf.name}, byte_offset={byte_offset})")
+            self.trace.append(f"{lhs} = vldsx1(UB, byte_offset={base_byte + byte_offset})")
             return
 
         if name == "@llvm.hivm.vadd.v64f32.x":
@@ -273,14 +375,14 @@ class DavVAddSim:
             if len(args) != 6:
                 raise SimError(f"{name}: expected 6 args, got {len(args)}")
             vec = self._as_vector(args[0], "vstsx1 value", allow_inactive=True)
-            buf = self._buffer_for_ptr(args[1])
+            buf, base_byte = self._resolve_pointer(args[1], "ub")
             byte_offset = self._as_int(args[2], "vstsx1 byte offset")
             norm = self._as_int(args[3], "vstsx1 norm")
             postupdate = self._as_int(args[4], "vstsx1 postupdate")
             mask = self._as_mask(args[5], "vstsx1 mask")
             if norm != 0 or postupdate != 0:
                 raise SimError("vstsx1 milestone supports norm=0 and postupdate=0 only")
-            start = self._check_region(buf, byte_offset, VECTOR_BYTES_V64F32, "vstsx1")
+            start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V64F32, "vstsx1")
             for idx, active in enumerate(mask):
                 if not active:
                     continue
@@ -288,7 +390,7 @@ class DavVAddSim:
                 if value is None:
                     raise SimError(f"vstsx1 stores inactive/undefined lane {idx}")
                 buf.values[start + idx] = float(value)
-            self.trace.append(f"vstsx1({args[0].value}, {buf.name}, byte_offset={byte_offset})")
+            self.trace.append(f"vstsx1({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
             return
 
         self.unsupported.append(name)

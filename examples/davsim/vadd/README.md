@@ -1,10 +1,11 @@
 # ASC dav-sim vadd smoke test
 
 This directory contains the first local dav intrinsic simulation milestone.
-It exercises a single UB-resident `vector<64xf32>` add:
+It exercises a single GM-entry `vector<64xf32>` add with explicit UB staging:
 
 ```text
-pset -> vldsx1(a) -> vldsx1(b) -> vadd -> vstsx1(out)
+GM a,b -> MOV.OUT.TO.UB -> vldsx1 -> vadd -> vstsx1
+       -> MOV.UB.TO.OUT -> GM out
 ```
 
 Run it from the repository root:
@@ -16,5 +17,6 @@ build/bin/asc-sim examples/davsim/vadd/vadd.ll \
 ```
 
 The model is intentionally functional. It checks the hardware constraints that
-matter for the first step, including UB address space, 32-byte alignment, and
-buffer overflow, but it does not model cycle timing or pipeline scheduling.
+matter for the first step, including GM/UB address space separation, 32-byte
+alignment, DMA region bounds, and buffer overflow, but it does not model cycle
+timing or pipeline scheduling.

@@ -7,7 +7,7 @@
   },
   "buffers": {
     "a": {
-      "space": "ub",
+      "space": "gm",
       "dtype": "f32",
       "values": [
         0, 1, 2, 3, 4, 5, 6, 7,
@@ -21,7 +21,7 @@
       ]
     },
     "b": {
-      "space": "ub",
+      "space": "gm",
       "dtype": "f32",
       "values": [
         100, 100, 100, 100, 100, 100, 100, 100,
@@ -35,11 +35,13 @@
       ]
     },
     "out": {
-      "space": "ub",
+      "space": "gm",
       "dtype": "f32",
       "size": 64
     }
   },
+  "ub_size_bytes": 1024,
+  "dma_bytes": 256,
   "checks": [
     {
       "buffer": "out",
