@@ -190,7 +190,7 @@ def classify_simulator_status(result: subprocess.CompletedProcess[str]) -> tuple
     ]
     abs_failed = abs_ratios and any(ratio < 100.0 for ratio in abs_ratios)
     rel_failed = rel_ratios and any(ratio < 100.0 for ratio in rel_ratios)
-    if abs_failed and rel_failed:
+    if abs_failed or rel_failed:
         return "check_failed", tail(text)
     return "pass", None
 
@@ -821,9 +821,14 @@ def run_external_asc_static_case(
         }
         missing_configured = sorted(configured - found)
         unsupported = sorted(found - ASC_MODEL_SUPPORTED_INTRINSICS)
-        status = "pass"
-        if lower_result.returncode != 0 or unsupported or missing_configured:
-            status = "error"
+        if lower_result.returncode != 0:
+            status = "lower_error"
+        elif missing_configured:
+            status = "coverage_config_error"
+        elif unsupported:
+            status = "static_unsupported"
+        else:
+            status = "pass"
         details = []
         if unsupported:
             details.append("unsupported intrinsics: " + ", ".join(unsupported[:12]))
@@ -847,7 +852,7 @@ def run_external_asc_static_case(
             "stdout_tail": tail(lower_result.stdout),
         }
     except Exception as exc:
-        status = "error"
+        status = "lower_error"
         return {
             "name": case_cfg["name"],
             "kind": "external-asc-static",
@@ -906,6 +911,8 @@ def run_lowered_case(
 
 
 def simulator_case_needs_lowered_ir(case_cfg: dict[str, Any]) -> bool:
+    if case_cfg.get("external_case"):
+        return False
     return (
         case_cfg.get("op", "vadd") != "vadd"
         or case_cfg.get("mode", "x") != "x"
@@ -1026,6 +1033,8 @@ def run_simulator_case(
 
 def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, tmp_dir: Path) -> Path:
     source = opentileas_repo / case_cfg["case_dir"]
+    if case_cfg.get("external_case"):
+        return source
     if "n_elements" not in case_cfg and case_cfg.get("op", "vadd") == "vadd":
         return source
 
@@ -1211,9 +1220,32 @@ def check_simulator_coverage(suite: dict[str, Any], run_simulator: bool) -> list
                 f"{case['name']}: ASC pass case has no simulator oracle "
                 f"for kernel key {key!r}"
             )
+    for case in suite.get("external_cases", []):
+        if case.get("expect_asc_status", "pass") != "pass":
+            continue
+        if not case.get("require_simulator", True):
+            continue
+        if "expect_simulator_status" not in case:
+            gaps.append(
+                f"{case['name']}: external ASC pass case has no simulator oracle status"
+            )
+        elif not run_simulator:
+            gaps.append(
+                f"{case['name']}: external ASC pass case requires --run-simulator"
+            )
     if gaps and not run_simulator:
         gaps.append("run with --run-simulator to execute configured simulator oracle cases")
     return gaps
+
+
+def filter_suite_cases(suite: dict[str, Any], case_filter: str) -> dict[str, Any]:
+    pattern = re.compile(case_filter)
+    filtered = copy.deepcopy(suite)
+    for section in ("asc_cases", "lowered_cases", "simulator_cases", "external_cases"):
+        filtered[section] = [
+            case for case in filtered.get(section, []) if pattern.search(case["name"])
+        ]
+    return filtered
 
 
 def main(argv: list[str]) -> int:
@@ -1232,6 +1264,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--launcher", default="/usr/local/sbin/opentileas-simu-exec")
     parser.add_argument("--report", type=Path)
     parser.add_argument(
+        "--case-filter",
+        help="only run suite cases whose name matches this regular expression",
+    )
+    parser.add_argument(
         "--enforce-simulator-coverage",
         action="store_true",
         help="fail if an ASC-pass lowered case lacks a matching simulator oracle case",
@@ -1240,6 +1276,8 @@ def main(argv: list[str]) -> int:
 
     suite_path = args.suite.resolve()
     suite = load_json(suite_path)
+    if args.case_filter:
+        suite = filter_suite_cases(suite, args.case_filter)
     suite_dir = suite_path.parent
     asc_sim = args.asc_sim.resolve()
     if not asc_sim.is_file():
@@ -1284,9 +1322,11 @@ def main(argv: list[str]) -> int:
                     )
                 )
             for case_cfg in suite.get("external_cases", []):
+                external_cfg = dict(case_cfg)
+                external_cfg["external_case"] = True
                 results.append(
                     run_simulator_case(
-                        case_cfg,
+                        external_cfg,
                         args.opentileas_repo.resolve(),
                         args.opentileas_build_dir.resolve(),
                         args.ssh,

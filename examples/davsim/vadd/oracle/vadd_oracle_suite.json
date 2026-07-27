@@ -1506,7 +1506,7 @@
       "core": "vec",
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "error",
+      "expect_asc_status": "static_unsupported",
       "expect_simulator_status": "pass",
       "intrinsics": [
         "@llvm.hivm.BARRIER",
@@ -1532,6 +1532,144 @@
         "@llvm.hivm.vstsx1.v128s16",
         "@llvm.hivm.vstsx1.v64f32",
         "@llvm.hivm.vstsx1.v64s32"
+      ]
+    },
+    {
+      "name": "opentile_a5_fused_f32",
+      "mlir": "simulator/cases/a5_fused_f32/kernel.cce.mlir",
+      "case_dir": "simulator/cases/a5_fused_f32",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "static_unsupported",
+      "expect_simulator_status": "pass",
+      "intrinsics": [
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.pset.b32",
+        "@llvm.hivm.vaxpy.m.v64f32",
+        "@llvm.hivm.vldsx1.v64f32",
+        "@llvm.hivm.vlrelu.x.v64f32",
+        "@llvm.hivm.vmadd.m.v64f32",
+        "@llvm.hivm.vstsx1.v64f32"
+      ]
+    },
+    {
+      "name": "opentile_a5_memory_blocks_f16",
+      "mlir": "simulator/cases/a5_memory_blocks_f16/kernel.cce.mlir",
+      "case_dir": "simulator/cases/a5_memory_blocks_f16",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "static_unsupported",
+      "expect_simulator_status": "pass",
+      "intrinsics": [
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV",
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.pset.b16",
+        "@llvm.hivm.vgatherb.v310.v128f16",
+        "@llvm.hivm.vldsx1.v64s32",
+        "@llvm.hivm.vsldb",
+        "@llvm.hivm.vstsx1.v128f16"
+      ]
+    },
+    {
+      "name": "opentile_a5_predicate_widths",
+      "mlir": "simulator/cases/a5_predicate_widths/kernel.cce.mlir",
+      "case_dir": "simulator/cases/a5_predicate_widths",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "static_unsupported",
+      "expect_simulator_status": "pass",
+      "intrinsics": [
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.plds.b8",
+        "@llvm.hivm.psts.b8"
+      ]
+    },
+    {
+      "name": "opentile_a5_vmulscvt_f16",
+      "mlir": "simulator/cases/a5_vmulscvt_f16/kernel.cce.mlir",
+      "case_dir": "simulator/cases/a5_vmulscvt_f16",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "static_unsupported",
+      "expect_simulator_status": "pass",
+      "intrinsics": [
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.pset.b16",
+        "@llvm.hivm.pset.b32",
+        "@llvm.hivm.vldsx1.v64f32",
+        "@llvm.hivm.vmulscvt.v128f16",
+        "@llvm.hivm.vstsx1.v128f16"
+      ]
+    },
+    {
+      "name": "opentile_a5_dma_chain",
+      "mlir": "simulator/cases/a5_dma_chain/kernel.cce.mlir",
+      "case_dir": "simulator/cases/a5_dma_chain",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "static_unsupported",
+      "expect_simulator_status": "check_failed",
+      "intrinsics": [
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.MOV.UB.TO.UB.v310",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM"
+      ]
+    },
+    {
+      "name": "opentile_a5_mx_mad_e4m3",
+      "mlir": "simulator/cases/a5_mx_mad_e4m3/kernel.cce.mlir",
+      "case_dir": "simulator/cases/a5_mx_mad_e4m3",
+      "config": "runner.json",
+      "core": "cube",
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "static_unsupported",
+      "expect_simulator_status": "pass",
+      "intrinsics": [
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.FIX.L0C.TO.OUT.f32.EXT",
+        "@llvm.hivm.GET.CTRL",
+        "@llvm.hivm.LOAD.L1.TO.L0A.2Dv2.s8",
+        "@llvm.hivm.LOAD.L1.TO.L0A.MX.2Dv2.v",
+        "@llvm.hivm.LOAD.L1.TO.L0B.2Dv2.s8",
+        "@llvm.hivm.LOAD.L1.TO.L0B.MX.2Dv2.v",
+        "@llvm.hivm.MMAD.MX.e4m3e4m3",
+        "@llvm.hivm.MOV.OUT.TO.L1.ALIGN.V2.e4m3.DV",
+        "@llvm.hivm.SBITSET0",
+        "@llvm.hivm.SET.CHANNEL.PARA",
+        "@llvm.hivm.SET.CTRL",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.SET.LOOP3.PARA",
+        "@llvm.hivm.WAIT.FLAG.IMM"
       ]
     }
   ]

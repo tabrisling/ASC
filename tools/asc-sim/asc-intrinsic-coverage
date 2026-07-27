@@ -168,14 +168,20 @@ def discover_intrinsics(opentileas_repo: Path) -> dict[str, dict[str, Any]]:
 
 def categorize(name: str) -> str:
     lowered = name.lower()
+    if any(token in lowered for token in ("mmad", "l0a", "l0b", "l0c", "fix.l0c", "load.l1.to")):
+        return "cube-matmul"
     if any(token in lowered for token in ("mov.", "get.buf", "rls.buf")):
         return "dma"
     if any(token in lowered for token in ("flag", "barrier", "mem.bar", "sbitset", "ctrl")):
         return "sync"
-    if any(token in lowered for token in ("vlds", "vldu", "vsts", "vstus", "vstas")):
+    if any(token in lowered for token in ("pld", "plt.", "pst", "pset")):
+        return "predicate-state"
+    if any(token in lowered for token in ("vlds", "vldu", "vsts", "vstus", "vstas", "vsldb")):
         return "load-store"
-    if any(token in lowered for token in ("vcvt", "vtrc")):
+    if any(token in lowered for token in ("vcvt", "vtrc", "vmulscvt")):
         return "convert"
+    if any(token in lowered for token in ("set.channel", "set.loop")):
+        return "sync"
     if "gather" in lowered or "scatter" in lowered:
         return "gather-scatter"
     if "vsel" in lowered or "cmp" in lowered or "pintlv" in lowered or "pmov" in lowered:
@@ -186,10 +192,14 @@ def categorize(name: str) -> str:
         return "scalar-vector"
     if any(token in lowered for token in ("vabs", "vneg", "vsqrt", "vrsqrt", "vrec", "vexp", "vln", "vrelu", "vnot")):
         return "unary"
+    if any(token in lowered for token in ("vaxpy", "vmadd")):
+        return "fused-vector"
     if any(token in lowered for token in ("vadd", "vsub", "vmul", "vdiv", "vmax", "vmin", "vand")):
         return "binary"
     if "vdups" in lowered or "vbr" in lowered:
         return "broadcast"
+    if any(token in lowered for token in ("sort", "vbs", "sqz", "vmrg", "unpack", "pack")):
+        return "rearrange-sort"
     return "unknown"
 
 
@@ -219,6 +229,8 @@ def priority(name: str) -> str:
         )
     ):
         return "P0"
+    if any(token in lowered for token in ("mmad", "l0a", "l0b", "l0c", "fix.l0c", "load.l1.to")):
+        return "P1"
     if ".v64f32" in lowered or ".v128f16" in lowered or ".v128bf16" in lowered:
         return "P1"
     return "P2"
@@ -228,16 +240,18 @@ def suite_intrinsics(suite: dict[str, Any]) -> set[str]:
     covered: set[str] = set()
     for section in ("asc_cases", "lowered_cases", "simulator_cases", "external_cases"):
         for case in suite.get(section, []):
-            covered.update(case_intrinsics(case))
+            covered.update(case_intrinsics(case, include_suite_op=section != "external_cases"))
             covered.update(case_kernel_intrinsics(case, section))
     return covered
 
 
-def case_intrinsics(case: dict[str, Any]) -> set[str]:
+def case_intrinsics(case: dict[str, Any], *, include_suite_op: bool = True) -> set[str]:
     names = {
         name if name.startswith("@") else "@" + name
         for name in case.get("intrinsics", [])
     }
+    if not include_suite_op:
+        return names
     op = case.get("op", "vadd")
     if op == "vrec" and case.get("decompose_vrec"):
         return names
@@ -286,7 +300,7 @@ def suite_evidence(suite: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
                 )
                 item[bucket].append(case["name"])
     for case in suite.get("external_cases", []):
-        names = case_intrinsics(case)
+        names = case_intrinsics(case, include_suite_op=False)
         for domain, status_key in (
             ("asc", "expect_asc_status"),
             ("simulator", "expect_simulator_status"),
@@ -351,7 +365,9 @@ def report(inventory: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "supported": sum(1 for item in items if item["model"] == "supported"),
         "unsupported": sum(1 for item in items if item["model"] != "supported"),
         "oracle_covered": sum(1 for item in items if item.get("oracle") not in (None, "missing")),
+        "behavior_oracle": sum(1 for item in items if item.get("oracle") == "pass-oracle"),
         "fail_closed": sum(1 for item in items if item.get("oracle") == "fail-closed"),
+        "model_gap": sum(1 for item in items if item.get("oracle") == "model-gap"),
         "by_priority": {},
         "by_category": {},
         "by_oracle": {},
@@ -401,7 +417,9 @@ def main(argv: list[str]) -> int:
         f"{summary['supported']}/{summary['total']} model-supported, "
         f"{summary['unsupported']} unsupported, "
         f"{summary['oracle_covered']} oracle-covered, "
-        f"{summary['fail_closed']} fail-closed"
+        f"{summary['behavior_oracle']} behavior, "
+        f"{summary['fail_closed']} fail-closed, "
+        f"{summary['model_gap']} model-gap"
     )
     print(f"by priority: {summary['by_priority']}")
     print(f"by category: {summary['by_category']}")
