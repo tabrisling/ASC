@@ -574,6 +574,7 @@ class DavVAddSim:
         self.unsupported: list[str] = []
         self.flags: set[tuple[int, int, int]] = set()
         self.dma_bytes = int(case.get("dma_bytes", VECTOR_BYTES_V64F32))
+        self.vms4_sr = 0
 
     def _build_pointer_bindings(self) -> dict[str, str]:
         explicit = self.case.get("arguments", {})
@@ -762,6 +763,35 @@ class DavVAddSim:
         start = self._check_region(byte_view, byte_offset, len(values), op, alignment=1)
         byte_view.values[start : start + len(values)] = [int(x) & 0xFF for x in values]
         self._mirror_u8_range_to_typed_ub_views(byte_offset, len(values), op)
+
+    def _write_buffer_bytes(
+        self,
+        buf: Buffer,
+        byte_offset: int,
+        values: list[int],
+        op: str,
+        alignment: int = 1,
+    ) -> None:
+        start = self._check_region(buf, byte_offset, len(values), op, alignment=alignment)
+        if buf.dtype in ("u8", "s8"):
+            raw = [int(x) & 0xFF for x in values]
+            if buf.dtype == "s8":
+                raw = [s8(x) for x in raw]
+            buf.values[start : start + len(raw)] = raw
+            return
+        if buf.dtype in ("u16", "s16"):
+            words16 = pack_u16_words_from_bytes(values)
+            if buf.dtype == "s16":
+                words16 = [s16(x) for x in words16]
+            buf.values[start : start + len(words16)] = words16
+            return
+        if buf.dtype in ("u32", "s32"):
+            words32 = pack_u32_words_from_bytes(values)
+            if buf.dtype == "s32":
+                words32 = [s32(x) for x in words32]
+            buf.values[start : start + len(words32)] = words32
+            return
+        raise SimError(f"{op}: raw byte store does not support {buf.dtype} buffers")
 
     def _mirror_u32_vector_to_u8_view(
         self,
@@ -1029,6 +1059,13 @@ class DavVAddSim:
                 raise SimError("GET.BLOCK.IDX result is unused")
             self.values[lhs] = int(self.case.get("block_idx", 0))
             self.trace.append(f"{lhs} = GET.BLOCK.IDX()")
+            return
+
+        if name == "@llvm.hivm.GET.VMS4.SR":
+            if lhs is None:
+                raise SimError("GET.VMS4.SR result is unused")
+            self.values[lhs] = self.vms4_sr
+            self.trace.append(f"{lhs} = GET.VMS4.SR() -> {self.vms4_sr:#x}")
             return
 
         if name == "@llvm.hivm.SBITSET0":
@@ -1420,6 +1457,51 @@ class DavVAddSim:
                 ]
             self._write_ub_bytes(dst_base, output, "VBS32")
             self.trace.append(f"VBS32({name.rsplit('.', 1)[-1]}, entries=32)")
+            return
+
+        if name in ("@llvm.hivm.VMRGSORT.f16.V300", "@llvm.hivm.VMRGSORT.f32.V300"):
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            count = self._as_int(args[2], "VMRGSORT count")
+            config = self._as_int(args[3], "VMRGSORT config")
+            count_fields = [(count >> shift) & 0xFFFF for shift in (0, 16, 32, 48)]
+            if count_fields != [1, 1, 1, 1]:
+                raise SimError("VMRGSORT milestone supports count=[1,1,1,1] only")
+            if config != 0x1F01:
+                raise SimError("VMRGSORT milestone supports config=0x1f01 only")
+            src_descriptor = self._read_scalar_or_pointer(args[1])
+            if isinstance(src_descriptor, PointerValue) or not isinstance(src_descriptor, int):
+                raise SimError("VMRGSORT source descriptor must be an encoded integer pointer")
+            src_offsets = [((src_descriptor >> shift) & 0xFFFF) << 3 for shift in (0, 16, 32, 48)]
+            if src_offsets != [0, 8, 16, 24]:
+                raise SimError(f"VMRGSORT milestone supports source offsets [0,8,16,24], got {src_offsets}")
+            dst, dst_base = self._resolve_pointer(args[0], "ub", preferred_dtype="u8")
+            if dst.dtype not in ("u8", "s8"):
+                raise SimError(f"{name}: expected byte-addressable output UB, got {dst.dtype}")
+            if name == "@llvm.hivm.VMRGSORT.f32.V300":
+                src, src_base = self._resolve_pointer(
+                    TypedValue(src_offsets[0], UB_ADDRSPACE),
+                    "ub",
+                    preferred_dtype="u32",
+                )
+                if src.dtype not in ("u32", "s32"):
+                    raise SimError(f"{name}: expected 32-bit source UB, got {src.dtype}")
+                start = self._check_region(src, src_base, 8, "VMRGSORT f32 source")
+                first_record = [
+                    byte
+                    for word in src.values[start : start + 2]
+                    for byte in u32_to_le_bytes(word)
+                ]
+            else:
+                src, src_base = self._resolve_pointer(
+                    TypedValue(src_offsets[0], UB_ADDRSPACE),
+                    "ub",
+                    preferred_dtype="u8",
+                )
+                first_record = self._read_ub_bytes(src, src_base, 8, "VMRGSORT f16 source")
+            self._write_ub_bytes(dst_base, first_record + [0] * 24, "VMRGSORT")
+            self.vms4_sr = 1
+            self.trace.append(f"VMRGSORT({name.rsplit('.', 2)[-2]}, singleton-exhausted)")
             return
 
         if name in (
@@ -2701,6 +2783,29 @@ class DavVAddSim:
             else:
                 raise SimError(f"{lhs}: cannot inttoptr {raw!r}")
             self.trace.append(f"{lhs} = inttoptr(...)")
+            return True
+
+        store_i64 = re.match(
+            r"store\s+i64\s+(.+?),\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+?)(?:,\s+align\s+(\d+))?$",
+            line,
+        )
+        if store_i64:
+            value = self._as_int(parse_typed_value(store_i64.group(1)), "store i64 value")
+            addrspace = int(store_i64.group(2)) if store_i64.group(2) else GM_ADDRSPACE
+            ptr = parse_typed_value(f"ptr addrspace({addrspace}) {store_i64.group(3)}")
+            expected_space = "gm" if addrspace == GM_ADDRSPACE else "ub"
+            if expected_space != "gm":
+                raise SimError("store i64 milestone supports GM destinations only")
+            buf, byte_offset = self._resolve_pointer(ptr, expected_space)
+            alignment = int(store_i64.group(4)) if store_i64.group(4) else 1
+            self._write_buffer_bytes(
+                buf,
+                byte_offset,
+                u64_to_le_bytes(value),
+                "store i64",
+                alignment=alignment,
+            )
+            self.trace.append(f"store.i64({value:#x}) -> {buf.name}+{byte_offset}")
             return True
 
         cast = re.match(r"(%[-A-Za-z0-9_.$]+)\s*=\s*(?:trunc|sext)\s+i\d+\s+(.+?)\s+to\s+i\d+$", line)

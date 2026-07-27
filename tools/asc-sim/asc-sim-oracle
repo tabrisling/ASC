@@ -132,8 +132,11 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.SET.FLAG.IMM",
     "@llvm.hivm.WAIT.FLAG.IMM",
     "@llvm.hivm.BARRIER",
+    "@llvm.hivm.GET.VMS4.SR",
     "@llvm.hivm.VBS32.V300.f16",
     "@llvm.hivm.VBS32.V300.f32",
+    "@llvm.hivm.VMRGSORT.f16.V300",
+    "@llvm.hivm.VMRGSORT.f32.V300",
     "@llvm.hivm.sprclr",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV",
@@ -1454,6 +1457,83 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
                 "ub_size_bytes": 1024,
                 "dma_bytes": 256,
                 "checks": [{"buffer": "out", "golden": golden16, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
+    if generated in ("a5_vmrgsort4_f32_8", "a5_vmrgsort4_f16_16"):
+        scores = [9.0, 7.0, 8.0, 6.0]
+        indices = [0x1005A, 70, 80, 60]
+
+        def f16_bits(value: float) -> int:
+            return struct.unpack("<H", struct.pack("<e", f16(value)))[0]
+
+        def f32_bits(value: float) -> int:
+            return struct.unpack("<I", struct.pack("<f", f32(value)))[0]
+
+        def le16(value: int) -> list[int]:
+            raw = value & 0xFFFF
+            return [raw & 0xFF, (raw >> 8) & 0xFF]
+
+        if generated == "a5_vmrgsort4_f32_8":
+            source = [
+                word
+                for score, index in zip(scores, indices)
+                for word in (f32_bits(score), index & 0xFFFFFFFF)
+            ]
+            case_json.clear()
+            case_json.update(
+                {
+                    "entry": "dav_vmrgsort4_f32",
+                    "arguments": {
+                        "%input": "input",
+                        "%output": "output",
+                        "%counts": "counts",
+                    },
+                    "buffers": {
+                        "input": {"space": "gm", "dtype": "u32", "values": source},
+                        "output": {"space": "gm", "dtype": "u32", "size": 8},
+                        "counts": {"space": "gm", "dtype": "u16", "size": 4},
+                    },
+                    "ub_dtypes": ["u8", "u32", "s32"],
+                    "ub_size_bytes": 512,
+                    "dma_bytes": 32,
+                    "checks": [
+                        {"buffer": "output", "golden": source[:2] + [0] * 6, "atol": 0, "rtol": 0},
+                        {"buffer": "counts", "golden": [1, 0, 0, 0], "atol": 0, "rtol": 0},
+                    ],
+                }
+            )
+            return
+
+        source16 = [0] * 16
+        for idx, (score, index) in enumerate(zip(scores, indices)):
+            base = idx * 4
+            source16[base] = f16_bits(score)
+            source16[base + 1] = 0
+            source16[base + 2] = index & 0xFFFF
+            source16[base + 3] = (index >> 16) & 0xFFFF
+        source_bytes = [byte for word in source16 for byte in le16(word)]
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_vmrgsort4_f16",
+                "arguments": {
+                    "%input": "input",
+                    "%output": "output",
+                    "%counts": "counts",
+                },
+                "buffers": {
+                    "input": {"space": "gm", "dtype": "u8", "values": source_bytes},
+                    "output": {"space": "gm", "dtype": "u16", "size": 16},
+                    "counts": {"space": "gm", "dtype": "u16", "size": 4},
+                },
+                "ub_dtypes": ["u8", "u16", "f16"],
+                "ub_size_bytes": 512,
+                "dma_bytes": 32,
+                "checks": [
+                    {"buffer": "output", "golden": source16[:4] + [0] * 12, "atol": 0, "rtol": 0},
+                    {"buffer": "counts", "golden": [1, 0, 0, 0], "atol": 0, "rtol": 0},
+                ],
             }
         )
         return
