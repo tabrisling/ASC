@@ -45,20 +45,50 @@ MODEL_SUPPORTED = {
 }
 
 SUITE_OP_INTRINSICS = {
-    "vadd": "@llvm.hivm.vadd.s.x.v64f32",
-    "vsub": "@llvm.hivm.vsub.s.x.v64f32",
-    "vmul": "@llvm.hivm.vmul.s.x.v64f32",
-    "vdiv": "@llvm.hivm.vdiv.s.x.v64f32",
-    "vmax": "@llvm.hivm.vmax.s.x.v64f32",
-    "vmin": "@llvm.hivm.vmin.s.x.v64f32",
+    "vadd": {
+        "m": "@llvm.hivm.vadd.s.m.v64f32",
+        "x": "@llvm.hivm.vadd.s.x.v64f32",
+        "z": "@llvm.hivm.vadd.s.z.v64f32",
+    },
+    "vsub": {
+        "m": "@llvm.hivm.vsub.s.m.v64f32",
+        "x": "@llvm.hivm.vsub.s.x.v64f32",
+        "z": "@llvm.hivm.vsub.s.z.v64f32",
+    },
+    "vmul": {
+        "m": "@llvm.hivm.vmul.s.m.v64f32",
+        "x": "@llvm.hivm.vmul.s.x.v64f32",
+        "z": "@llvm.hivm.vmul.s.z.v64f32",
+    },
+    "vdiv": {
+        "m": "@llvm.hivm.vdiv.s.m.v64f32",
+        "x": "@llvm.hivm.vdiv.s.x.v64f32",
+        "z": "@llvm.hivm.vdiv.s.z.v64f32",
+    },
+    "vmax": {
+        "m": "@llvm.hivm.vmax.s.m.v64f32",
+        "x": "@llvm.hivm.vmax.s.x.v64f32",
+        "z": "@llvm.hivm.vmax.s.z.v64f32",
+    },
+    "vmin": {
+        "m": "@llvm.hivm.vmin.s.m.v64f32",
+        "x": "@llvm.hivm.vmin.s.x.v64f32",
+        "z": "@llvm.hivm.vmin.s.z.v64f32",
+    },
     "vabs": "@llvm.hivm.vabs.x.v64f32",
     "vneg": "@llvm.hivm.vneg.x.v64f32",
     "vrelu": "@llvm.hivm.vrelu.x.v64f32",
     "vsqrt": "@llvm.hivm.vsqrt.x.v64f32",
     "vrec": "@llvm.hivm.vrec.x.v64f32",
     "vexp": "@llvm.hivm.vexp.x.v64f32",
-    "vadds": "@llvm.hivm.vadds.s.x.v64f32",
-    "vmuls": "@llvm.hivm.vmuls.s.x.v64f32",
+    "vadds": {
+        "m": "@llvm.hivm.vadds.s.m.v64f32",
+        "x": "@llvm.hivm.vadds.s.x.v64f32",
+    },
+    "vmuls": {
+        "m": "@llvm.hivm.vmuls.s.m.v64f32",
+        "x": "@llvm.hivm.vmuls.s.x.v64f32",
+    },
     "vmaxs": "@llvm.hivm.vmaxs.s.x.v64f32",
     "vmins": "@llvm.hivm.vmins.s.x.v64f32",
     "vdups": "@llvm.hivm.vdups.z.v64f32",
@@ -167,9 +197,17 @@ def suite_intrinsics(suite: dict[str, Any]) -> set[str]:
     covered: set[str] = set()
     for section in ("asc_cases", "lowered_cases", "simulator_cases"):
         for case in suite.get(section, []):
+            for name in case.get("intrinsics", []):
+                covered.add(name if name.startswith("@") else "@" + name)
             op = case.get("op", "vadd")
             if op in SUITE_OP_INTRINSICS:
-                covered.add(SUITE_OP_INTRINSICS[op])
+                entry = SUITE_OP_INTRINSICS[op]
+                if isinstance(entry, dict):
+                    mode = case.get("mode", "x")
+                    if mode in entry:
+                        covered.add(entry[mode])
+                else:
+                    covered.add(entry)
     return covered
 
 

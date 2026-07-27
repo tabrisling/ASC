@@ -28,6 +28,27 @@ VECTOR_BINARY_INTRINSICS = {
     "vmin": "@llvm.hivm.vmin.s.x.v64f32",
 }
 
+VECTOR_BINARY_MODE_INTRINSICS = {
+    ("vadd", "x"): "@llvm.hivm.vadd.s.x.v64f32",
+    ("vadd", "m"): "@llvm.hivm.vadd.s.m.v64f32",
+    ("vadd", "z"): "@llvm.hivm.vadd.s.z.v64f32",
+    ("vsub", "x"): "@llvm.hivm.vsub.s.x.v64f32",
+    ("vsub", "m"): "@llvm.hivm.vsub.s.m.v64f32",
+    ("vsub", "z"): "@llvm.hivm.vsub.s.z.v64f32",
+    ("vmul", "x"): "@llvm.hivm.vmul.s.x.v64f32",
+    ("vmul", "m"): "@llvm.hivm.vmul.s.m.v64f32",
+    ("vmul", "z"): "@llvm.hivm.vmul.s.z.v64f32",
+    ("vdiv", "x"): "@llvm.hivm.vdiv.s.x.v64f32",
+    ("vdiv", "m"): "@llvm.hivm.vdiv.s.m.v64f32",
+    ("vdiv", "z"): "@llvm.hivm.vdiv.s.z.v64f32",
+    ("vmax", "x"): "@llvm.hivm.vmax.s.x.v64f32",
+    ("vmax", "m"): "@llvm.hivm.vmax.s.m.v64f32",
+    ("vmax", "z"): "@llvm.hivm.vmax.s.z.v64f32",
+    ("vmin", "x"): "@llvm.hivm.vmin.s.x.v64f32",
+    ("vmin", "m"): "@llvm.hivm.vmin.s.m.v64f32",
+    ("vmin", "z"): "@llvm.hivm.vmin.s.z.v64f32",
+}
+
 VECTOR_UNARY_INTRINSICS = {
     "vabs": "@llvm.hivm.vabs.x.v64f32",
     "vneg": "@llvm.hivm.vneg.x.v64f32",
@@ -42,6 +63,15 @@ VECTOR_SCALAR_INTRINSICS = {
     "vmuls": "@llvm.hivm.vmuls.s.x.v64f32",
     "vmaxs": "@llvm.hivm.vmaxs.s.x.v64f32",
     "vmins": "@llvm.hivm.vmins.s.x.v64f32",
+}
+
+VECTOR_SCALAR_MODE_INTRINSICS = {
+    ("vadds", "x"): "@llvm.hivm.vadds.s.x.v64f32",
+    ("vadds", "m"): "@llvm.hivm.vadds.s.m.v64f32",
+    ("vmuls", "x"): "@llvm.hivm.vmuls.s.x.v64f32",
+    ("vmuls", "m"): "@llvm.hivm.vmuls.s.m.v64f32",
+    ("vmaxs", "x"): "@llvm.hivm.vmaxs.s.x.v64f32",
+    ("vmins", "x"): "@llvm.hivm.vmins.s.x.v64f32",
 }
 
 VECTOR_DUP_INTRINSICS = {
@@ -83,6 +113,31 @@ def classify_asc_status(returncode: int) -> str:
     return "error"
 
 
+def classify_simulator_status(result: subprocess.CompletedProcess[str]) -> tuple[str, str | None]:
+    if result.returncode != 0:
+        return "error", None
+    local_run = parse_local_run(result.stdout)
+    if not local_run:
+        return "pass", None
+    log = Path(local_run) / "remote" / "logs" / "simulator.log"
+    if not log.is_file():
+        return "pass", None
+    text = log.read_text(encoding="utf-8", errors="ignore")
+    abs_ratios = [
+        float(match.group(1))
+        for match in re.finditer(r"abs_pass_ratio\([^)]*\):\s+([0-9.]+)%", text)
+    ]
+    rel_ratios = [
+        float(match.group(1))
+        for match in re.finditer(r"rel_pass_ratio\([^)]*\):\s+([0-9.]+)%", text)
+    ]
+    abs_failed = abs_ratios and any(ratio < 100.0 for ratio in abs_ratios)
+    rel_failed = rel_ratios and any(ratio < 100.0 for ratio in rel_ratios)
+    if abs_failed and rel_failed:
+        return "check_failed", tail(text)
+    return "pass", None
+
+
 def apply_replacements(text: str, replacements: list[dict[str, str]]) -> str:
     for item in replacements:
         old = item["old"]
@@ -110,14 +165,18 @@ def run_asc_ir_case(
     generated = case_cfg.get("generated")
     if generated:
         apply_generated_asc_case(case_json, generated)
-    op = case_cfg.get("op")
-    if op and op != "vadd":
-        ir_text = patch_vector_compute_ir(case_cfg["name"], ir_text, op, lowered=False)
+    op = case_cfg.get("op", "vadd")
+    mode = case_cfg.get("mode", "x")
+    if case_cfg.get("op") or mode != "x":
+        ir_text = patch_vector_compute_ir(case_cfg["name"], ir_text, op, lowered=False, mode=mode)
         apply_vector_op_case(
             case_json,
             op,
             float(case_cfg.get("scalar", case_cfg_scalar_default(op))),
+            mode,
+            int(case_cfg.get("mask_pattern", 0)),
         )
+    ir_text = patch_mask_patterns(ir_text, case_cfg)
 
     work_ir = tmp_dir / f"{case_cfg['name']}.ll"
     work_case = tmp_dir / f"{case_cfg['name']}.case.json"
@@ -141,17 +200,26 @@ def run_asc_ir_case(
 
 def generated_vector_case(
     op: str,
+    mode: str,
     n_elements: int,
     allocated_elements: int,
     ub_size_bytes: int,
     dma_bytes: int,
+    mask_pattern: int = 0,
 ) -> dict[str, Any]:
     x, y = generated_inputs(op, allocated_elements)
     scalar = float(case_cfg_scalar_default(op))
     active = max(0, min(n_elements, allocated_elements))
+    mask = pattern_to_mask(mask_pattern)
     golden = [0.0] * allocated_elements
     for idx in range(active):
-        golden[idx] = eval_vector_op(op, x[idx], y[idx], scalar)
+        lane = idx % 64
+        if mask[lane]:
+            golden[idx] = eval_vector_op(op, x[idx], y[idx], scalar)
+        elif mode == "m":
+            golden[idx] = f32(x[idx])
+        elif mode == "z":
+            golden[idx] = 0.0
     return {
         "entry": "add_kernel",
         "arguments": {"%0": "x", "%1": "y", "%2": "output"},
@@ -211,6 +279,21 @@ def case_cfg_scalar_default(op: str) -> float:
     return 0.0
 
 
+def pattern_to_mask(pattern: int) -> list[bool]:
+    active_by_pattern = {
+        0: 64,
+        5: 4,
+        6: 8,
+        7: 16,
+        8: 32,
+        9: 64,
+    }
+    if pattern not in active_by_pattern:
+        raise RuntimeError(f"unsupported pset pattern {pattern}")
+    active = active_by_pattern[pattern]
+    return [idx < active for idx in range(64)]
+
+
 def generated_inputs(op: str, allocated_elements: int) -> tuple[list[float], list[float]]:
     if op in ("vsqrt", "vrec"):
         x = [1.0 + float(i) * 0.125 for i in range(allocated_elements)]
@@ -262,24 +345,47 @@ def eval_vector_op(op: str, a: float, b: float, scalar: float) -> float:
     raise RuntimeError(f"unsupported vector op: {op}")
 
 
-def apply_vector_op_case(case_json: dict[str, Any], op: str, scalar: float) -> None:
+def apply_vector_op_case(
+    case_json: dict[str, Any],
+    op: str,
+    scalar: float,
+    mode: str = "x",
+    mask_pattern: int = 0,
+) -> None:
     a = [float(x) for x in case_json["buffers"]["a"]["values"]]
     b = [float(x) for x in case_json["buffers"]["b"]["values"]]
-    case_json["checks"][0]["golden"] = [eval_vector_op(op, x, y, scalar) for x, y in zip(a, b)]
+    mask = pattern_to_mask(mask_pattern)
+    golden = []
+    for idx, (x, y) in enumerate(zip(a, b)):
+        if mask[idx % 64]:
+            golden.append(eval_vector_op(op, x, y, scalar))
+        elif mode == "m":
+            golden.append(f32(x))
+        elif mode == "z":
+            golden.append(0.0)
+        else:
+            golden.append(0.0)
+    case_json["checks"][0]["golden"] = golden
 
 
-def op_intrinsic(op: str) -> str:
+def op_intrinsic(op: str, mode: str = "x") -> str:
+    if (op, mode) in VECTOR_BINARY_MODE_INTRINSICS:
+        return VECTOR_BINARY_MODE_INTRINSICS[(op, mode)]
+    if (op, mode) in VECTOR_SCALAR_MODE_INTRINSICS:
+        return VECTOR_SCALAR_MODE_INTRINSICS[(op, mode)]
+    if mode != "x":
+        raise RuntimeError(f"unsupported vector op/mode: {op}.{mode}")
     for table in (VECTOR_BINARY_INTRINSICS, VECTOR_UNARY_INTRINSICS, VECTOR_SCALAR_INTRINSICS, VECTOR_DUP_INTRINSICS):
         if op in table:
             return table[op]
     raise RuntimeError(f"unsupported vector op: {op}")
 
 
-def patch_vector_compute_ir(case_name: str, ir_text: str, op: str, lowered: bool) -> str:
-    if op == "vadd":
+def patch_vector_compute_ir(case_name: str, ir_text: str, op: str, lowered: bool, mode: str = "x") -> str:
+    if op == "vadd" and mode == "x":
         return ir_text
     source = VECTOR_BINARY_INTRINSICS["vadd"] if lowered else "@llvm.hivm.vadd.v64f32.x"
-    target = op_intrinsic(op)
+    target = op_intrinsic(op, mode)
     call_pattern = re.compile(
         rf"(?P<lhs>%[-A-Za-z0-9_.$]+)\s*=\s*call\s+<64 x float>\s+{re.escape(source)}"
         r"\(<64 x float>\s+(?P<a>%[-A-Za-z0-9_.$]+),\s+<64 x float>\s+(?P<b>%[-A-Za-z0-9_.$]+),\s+<256 x i1>\s+(?P<mask>%[-A-Za-z0-9_.$]+)\)"
@@ -321,6 +427,42 @@ def patch_vector_compute_ir(case_name: str, ir_text: str, op: str, lowered: bool
     if declare_source not in patched:
         raise RuntimeError(f"{case_name}: source declaration not found")
     return patched.replace(declare_source, declare_target, 1)
+
+
+def patch_mask_patterns(ir_text: str, case_cfg: dict[str, Any]) -> str:
+    if "mask_pattern" in case_cfg:
+        new_pattern = int(case_cfg["mask_pattern"])
+        patched, count = re.subn(
+            r"(call\s+<256 x i1>\s+@llvm\.hivm\.pset\.b32\(i32\s+)0(\))",
+            rf"\g<1>{new_pattern}\2",
+            ir_text,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError(f"{case_cfg['name']}: expected one pset mask to patch")
+        ir_text = patched
+
+    if "store_mask_pattern" in case_cfg:
+        store_pattern = int(case_cfg["store_mask_pattern"])
+        pset = re.search(
+            r"(?P<lhs>%[-A-Za-z0-9_.$]+)\s*=\s*call\s+<256 x i1>\s+@llvm\.hivm\.pset\.b32\(i32\s+\d+\)",
+            ir_text,
+        )
+        if not pset:
+            raise RuntimeError(f"{case_cfg['name']}: pset call not found for store mask patch")
+        compute_mask = pset.group("lhs")
+        store_mask = "%asc_storemask"
+        insert = pset.group(0) + f"\n  {store_mask} = call <256 x i1> @llvm.hivm.pset.b32(i32 {store_pattern})"
+        ir_text = ir_text.replace(pset.group(0), insert, 1)
+        vsts_pattern = re.compile(
+            rf"(@llvm\.hivm\.vstsx1\.v64f32\(.+?<256 x i1>\s+){re.escape(compute_mask)}(\))"
+        )
+        patched, count = vsts_pattern.subn(rf"\g<1>{store_mask}\2", ir_text, count=1)
+        if count != 1:
+            raise RuntimeError(f"{case_cfg['name']}: expected one vstsx1 store mask to patch")
+        ir_text = patched
+
+    return ir_text
 
 
 def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
@@ -414,11 +556,14 @@ def materialize_lowered_ir(
         tmp_dir,
     )
     op = case_cfg.get("op", "vadd")
-    if op == "vadd":
-        return lowered, lower_result
     text = lowered.read_text(encoding="utf-8")
-    text = patch_vector_compute_ir(case_cfg["name"], text, op, lowered=True)
-    patched = lowered.with_name(f"{safe_slug(op)}-{lowered.name}")
+    mode = case_cfg.get("mode", "x")
+    if op != "vadd" or mode != "x":
+        text = patch_vector_compute_ir(case_cfg["name"], text, op, lowered=True, mode=mode)
+    text = patch_mask_patterns(text, case_cfg)
+    if op == "vadd" and mode == "x" and not any(k in case_cfg for k in ("mask_pattern", "store_mask_pattern")):
+        return lowered, lower_result
+    patched = lowered.with_name(f"{safe_slug(op + '-' + mode)}-{lowered.name}")
     patched.write_text(text, encoding="utf-8")
     return patched, lower_result
 
@@ -438,10 +583,12 @@ def run_lowered_case(
     )
     local_case = generated_vector_case(
         case_cfg.get("op", "vadd"),
+        case_cfg.get("mode", "x"),
         int(case_cfg.get("n_elements", case_cfg.get("elements", 1024))),
         int(case_cfg.get("allocated_elements", 1024)),
         int(case_cfg.get("ub_size_bytes", 12288)),
         int(case_cfg.get("dma_bytes", 4096)),
+        int(case_cfg.get("mask_pattern", 0)),
     )
     work_case = tmp_dir / f"{case_cfg['name']}.case.json"
     write_json(work_case, local_case)
@@ -462,6 +609,34 @@ def run_lowered_case(
     }
 
 
+def simulator_case_needs_lowered_ir(case_cfg: dict[str, Any]) -> bool:
+    return (
+        case_cfg.get("op", "vadd") != "vadd"
+        or case_cfg.get("mode", "x") != "x"
+        or "mask_pattern" in case_cfg
+        or "store_mask_pattern" in case_cfg
+    )
+
+
+def verify_materialized_ir(case_cfg: dict[str, Any], source_path: Path) -> None:
+    text = source_path.read_text(encoding="utf-8", errors="ignore")
+    op = case_cfg.get("op", "vadd")
+    mode = case_cfg.get("mode", "x")
+    expected_intrinsic = op_intrinsic(op, mode)
+    if expected_intrinsic not in text:
+        raise RuntimeError(
+            f"{case_cfg['name']}: materialized IR does not contain {expected_intrinsic}"
+        )
+    if "mask_pattern" in case_cfg:
+        expected = f"@llvm.hivm.pset.b32(i32 {int(case_cfg['mask_pattern'])})"
+        if expected not in text:
+            raise RuntimeError(f"{case_cfg['name']}: materialized IR missing compute {expected}")
+    if "store_mask_pattern" in case_cfg:
+        expected = f"@llvm.hivm.pset.b32(i32 {int(case_cfg['store_mask_pattern'])})"
+        if expected not in text:
+            raise RuntimeError(f"{case_cfg['name']}: materialized IR missing store {expected}")
+
+
 def run_simulator_case(
     case_cfg: dict[str, Any],
     opentileas_repo: Path,
@@ -478,7 +653,7 @@ def run_simulator_case(
         case_dir = materialize_simulator_case(case_cfg, opentileas_repo, tmp_dir)
         source_flag = "--mlir"
         source_path = opentileas_repo / case_cfg["mlir"]
-        if case_cfg.get("op", "vadd") != "vadd":
+        if simulator_case_needs_lowered_ir(case_cfg):
             source_path, _ = materialize_lowered_ir(
                 case_cfg,
                 opentileas_repo,
@@ -486,13 +661,14 @@ def run_simulator_case(
                 tmp_dir / f"sim-ir-{case_cfg['name']}",
             )
             source_flag = "--llvm-ir"
+            verify_materialized_ir(case_cfg, source_path)
     except Exception as exc:
         return {
             "name": case_cfg["name"],
             "kind": "simulator-oracle",
-            "status": "error",
+            "status": "oracle_materialization_error",
             "expected": expected,
-            "ok": expected == "error",
+            "ok": expected == "oracle_materialization_error",
             "returncode": None,
             "local_run": None,
             "stderr_tail": f"materialize-error: {exc}",
@@ -526,7 +702,7 @@ def run_simulator_case(
         case_cfg.get("target", "dav-351x"),
     ]
     result = run_command(cmd)
-    status = "pass" if result.returncode == 0 else "error"
+    status, compare_tail = classify_simulator_status(result)
     return {
         "name": case_cfg["name"],
         "kind": "simulator-oracle",
@@ -535,7 +711,7 @@ def run_simulator_case(
         "ok": status == expected,
         "returncode": result.returncode,
         "local_run": parse_local_run(result.stdout),
-        "stderr_tail": tail(result.stderr),
+        "stderr_tail": compare_tail or tail(result.stderr),
         "stdout_tail": tail(result.stdout),
     }
 
@@ -560,7 +736,14 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "",
                 "",
                 f"OP = {case_cfg.get('op', 'vadd')!r}",
+                f"MODE = {case_cfg.get('mode', 'x')!r}",
+                f"MASK_PATTERN = {int(case_cfg.get('mask_pattern', 0))!r}",
+                f"STORE_MASK_PATTERN = {int(case_cfg.get('store_mask_pattern', case_cfg.get('mask_pattern', 0)))!r}",
                 "SCALAR = 2.0 if OP != 'vdups' else 3.5",
+                "",
+                "",
+                "def _active_lanes(pattern: int) -> int:",
+                "    return {0: 64, 5: 4, 6: 8, 7: 16, 8: 32, 9: 64}[int(pattern)]",
                 "",
                 "",
                 "def _apply(x: np.ndarray, y: np.ndarray) -> np.ndarray:",
@@ -604,7 +787,19 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "def add(x: np.ndarray, y: np.ndarray, n_elements: int) -> np.ndarray:",
                 "    n = max(0, min(int(n_elements), x.shape[0]))",
                 "    out = np.zeros_like(x, dtype=np.float32)",
-                "    out[:n] = _apply(x[:n], y[:n])",
+                "    computed = _apply(x[:n], y[:n]).astype(np.float32)",
+                "    compute_active = _active_lanes(MASK_PATTERN)",
+                "    store_active = _active_lanes(STORE_MASK_PATTERN)",
+                "    for idx in range(n):",
+                "        lane = idx % 64",
+                "        if lane >= store_active:",
+                "            continue",
+                "        if lane < compute_active:",
+                "            out[idx] = computed[idx]",
+                "        elif MODE == 'm':",
+                "            out[idx] = x[idx]",
+                "        else:",
+                "            out[idx] = np.float32(0.0)",
                 "    return out.astype(np.float32)",
                 "",
             ]
@@ -651,6 +846,9 @@ def oracle_key(case_cfg: dict[str, Any]) -> str:
     fields = [
         ("source", case_cfg.get("mlir") or case_cfg.get("ir")),
         ("op", case_cfg.get("op", "vadd")),
+        ("mode", case_cfg.get("mode", "x")),
+        ("mask", case_cfg.get("mask_pattern", 0)),
+        ("store_mask", case_cfg.get("store_mask_pattern", case_cfg.get("mask_pattern", 0))),
         ("n", case_cfg.get("n_elements")),
         ("alloc", case_cfg.get("allocated_elements", 1024)),
         ("ub", case_cfg.get("ub_size_bytes", 12288)),

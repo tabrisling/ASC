@@ -29,13 +29,13 @@ ALIGNMENT_BYTES = 32
 DEFAULT_UB_BYTES = 4096
 
 BINARY_VECTOR_OPS = {
-    "@llvm.hivm.vadd.v64f32.x": ("vadd", lambda a, b: f32(a + b)),
-    "@llvm.hivm.vadd.s.x.v64f32": ("vadd", lambda a, b: f32(a + b)),
-    "@llvm.hivm.vsub.s.x.v64f32": ("vsub", lambda a, b: f32(a - b)),
-    "@llvm.hivm.vmul.s.x.v64f32": ("vmul", lambda a, b: f32(a * b)),
-    "@llvm.hivm.vdiv.s.x.v64f32": ("vdiv", lambda a, b: f32_div(a, b)),
-    "@llvm.hivm.vmax.s.x.v64f32": ("vmax", lambda a, b: f32(max(a, b))),
-    "@llvm.hivm.vmin.s.x.v64f32": ("vmin", lambda a, b: f32(min(a, b))),
+    "@llvm.hivm.vadd.v64f32.x": ("vadd", "x", lambda a, b: f32(a + b)),
+    "@llvm.hivm.vadd.s.x.v64f32": ("vadd", "x", lambda a, b: f32(a + b)),
+    "@llvm.hivm.vsub.s.x.v64f32": ("vsub", "x", lambda a, b: f32(a - b)),
+    "@llvm.hivm.vmul.s.x.v64f32": ("vmul", "x", lambda a, b: f32(a * b)),
+    "@llvm.hivm.vdiv.s.x.v64f32": ("vdiv", "x", lambda a, b: f32_div(a, b)),
+    "@llvm.hivm.vmax.s.x.v64f32": ("vmax", "x", lambda a, b: f32(max(a, b))),
+    "@llvm.hivm.vmin.s.x.v64f32": ("vmin", "x", lambda a, b: f32(min(a, b))),
 }
 
 UNARY_VECTOR_OPS = {
@@ -47,10 +47,10 @@ UNARY_VECTOR_OPS = {
 }
 
 SCALAR_VECTOR_OPS = {
-    "@llvm.hivm.vadds.s.x.v64f32": ("vadds", lambda a, s: f32(a + s)),
-    "@llvm.hivm.vmuls.s.x.v64f32": ("vmuls", lambda a, s: f32(a * s)),
-    "@llvm.hivm.vmaxs.s.x.v64f32": ("vmaxs", lambda a, s: f32(max(a, s))),
-    "@llvm.hivm.vmins.s.x.v64f32": ("vmins", lambda a, s: f32(min(a, s))),
+    "@llvm.hivm.vadds.s.x.v64f32": ("vadds", "x", lambda a, s: f32(a + s)),
+    "@llvm.hivm.vmuls.s.x.v64f32": ("vmuls", "x", lambda a, s: f32(a * s)),
+    "@llvm.hivm.vmaxs.s.x.v64f32": ("vmaxs", "x", lambda a, s: f32(max(a, s))),
+    "@llvm.hivm.vmins.s.x.v64f32": ("vmins", "x", lambda a, s: f32(min(a, s))),
 }
 
 
@@ -229,14 +229,11 @@ def f32_exp(value: float) -> float:
 
 
 def pattern_to_mask(pattern: int) -> list[bool]:
-    # Codes observed in OpenTileAS CCE lowering: 0=all, 5=VL4, 6=VL8,
-    # 7=VL16, 8=VL32. Keep the first milestone deliberately conservative.
+    # The simulator oracle confirms pattern 0 as full-lane for the current f32
+    # milestone. Other pset encodings are intentionally fail-closed until their
+    # lane semantics are proven against dav-3510 simulator logs.
     active_by_pattern = {
         0: LANES_F32_V64,
-        5: 4,
-        6: 8,
-        7: 16,
-        8: 32,
         9: LANES_F32_V64,
     }
     if pattern not in active_by_pattern:
@@ -571,16 +568,13 @@ class DavVAddSim:
                 raise SimError(f"{BINARY_VECTOR_OPS[name][0]} result is unused")
             if len(args) != 3:
                 raise SimError(f"{name}: expected 3 args, got {len(args)}")
-            op_label, op = BINARY_VECTOR_OPS[name]
+            op_label, mode, op = BINARY_VECTOR_OPS[name]
             a = self._as_vector(args[0], f"{op_label} lhs")
             b = self._as_vector(args[1], f"{op_label} rhs")
             mask = self._as_mask(args[2], f"{op_label} mask")
-            result: list[float | None] = []
-            for idx, active in enumerate(mask):
-                result.append(op(float(a[idx]), float(b[idx])) if active else None)
-            self.values[lhs] = result
+            self.values[lhs] = self._map_binary_vector(a, b, mask, mode, op)
             self.trace.append(
-                f"{lhs} = {op_label}({args[0].value}, {args[1].value}, {args[2].value})"
+                f"{lhs} = {op_label}.{mode}({args[0].value}, {args[1].value}, {args[2].value})"
             )
             return
 
@@ -601,13 +595,13 @@ class DavVAddSim:
                 raise SimError(f"{SCALAR_VECTOR_OPS[name][0]} result is unused")
             if len(args) != 3:
                 raise SimError(f"{name}: expected 3 args, got {len(args)}")
-            op_label, op = SCALAR_VECTOR_OPS[name]
+            op_label, mode, op = SCALAR_VECTOR_OPS[name]
             vec = self._as_vector(args[0], f"{op_label} input")
             scalar = self._as_float(args[1], f"{op_label} scalar")
             mask = self._as_mask(args[2], f"{op_label} mask")
-            self.values[lhs] = self._map_scalar_vector(vec, scalar, mask, op)
+            self.values[lhs] = self._map_scalar_vector(vec, scalar, mask, mode, op)
             self.trace.append(
-                f"{lhs} = {op_label}({args[0].value}, {scalar}, {args[2].value})"
+                f"{lhs} = {op_label}.{mode}({args[0].value}, {scalar}, {args[2].value})"
             )
             return
 
@@ -660,16 +654,47 @@ class DavVAddSim:
             result.append(op(float(vec[idx])) if active else None)
         return result
 
+    def _inactive_lane(self, mode: str, merge_value: float | None) -> float | None:
+        if mode == "x":
+            return None
+        if mode == "z":
+            return 0.0
+        if mode == "m":
+            if merge_value is None:
+                raise SimError("merge mode reads an inactive source lane")
+            return float(merge_value)
+        raise SimError(f"unsupported vector mode {mode!r}")
+
+    def _map_binary_vector(
+        self,
+        left: list[float | None],
+        right: list[float | None],
+        mask: list[bool],
+        mode: str,
+        op: Callable[[float, float], float],
+    ) -> list[float | None]:
+        result: list[float | None] = []
+        for idx, active in enumerate(mask):
+            if active:
+                result.append(op(float(left[idx]), float(right[idx])))
+            else:
+                result.append(self._inactive_lane(mode, left[idx]))
+        return result
+
     def _map_scalar_vector(
         self,
         vec: list[float | None],
         scalar: float,
         mask: list[bool],
+        mode: str,
         op: Callable[[float, float], float],
     ) -> list[float | None]:
         result: list[float | None] = []
         for idx, active in enumerate(mask):
-            result.append(op(float(vec[idx]), scalar) if active else None)
+            if active:
+                result.append(op(float(vec[idx]), scalar))
+            else:
+                result.append(self._inactive_lane(mode, vec[idx]))
         return result
 
     def _execute_scalar_or_pointer_line(self, line: str) -> bool:
