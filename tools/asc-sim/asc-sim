@@ -21,14 +21,17 @@ from typing import Any, Callable
 
 
 LANES_F32_V64 = 64
+LANES_I32_V64 = 64
 LANES_F16_V128 = 128
 LANES_BF16_V128 = 128
 LANES_F32_V128 = 128
 F32_BYTES = 4
+I32_BYTES = 4
 F16_BYTES = 2
 BF16_BYTES = 2
 I8_BYTES = 1
 VECTOR_BYTES_V64F32 = LANES_F32_V64 * F32_BYTES
+VECTOR_BYTES_V64I32 = LANES_I32_V64 * I32_BYTES
 VECTOR_BYTES_V128F16 = LANES_F16_V128 * F16_BYTES
 VECTOR_BYTES_V128BF16 = LANES_BF16_V128 * BF16_BYTES
 PREDICATE_BYTES_B8 = 32
@@ -37,6 +40,7 @@ GM_ADDRSPACE = 1
 UB_ADDRSPACE = 6
 ALIGNMENT_BYTES = 32
 DEFAULT_UB_BYTES = 4096
+DMA_V2_LOW_COUNT_BYTES = 2
 
 BINARY_VECTOR_OPS = {
     "@llvm.hivm.vadd.v64f32.x": ("vadd", "x", lambda a, b: f32(a + b)),
@@ -115,6 +119,7 @@ CONVERT_VECTOR_OPS = {
 
 SELECT_VECTOR_OPS = {
     "@llvm.hivm.vsel.v64f32": "vsel",
+    "@llvm.hivm.vsel.v64i32": "vsel",
 }
 
 DIFF_EXP_VECTOR_OPS = {
@@ -145,7 +150,7 @@ class SimError(RuntimeError):
 @dataclass
 class Buffer:
     name: str
-    values: list[float]
+    values: list[int | float]
     dtype: str = "f32"
     space: str = "ub"
 
@@ -276,10 +281,10 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
     buffers: dict[str, Buffer] = {}
     for name, cfg in case.get("buffers", {}).items():
         dtype = cfg.get("dtype", "f32")
-        if dtype not in ("f32", "f16", "bf16", "u8", "s8"):
-            raise SimError(f"buffer {name}: only f32/f16/bf16/u8/s8 are supported now, got {dtype}")
+        if dtype not in ("f32", "f16", "bf16", "u32", "s32", "u8", "s8"):
+            raise SimError(f"buffer {name}: only f32/f16/bf16/u32/s32/u8/s8 are supported now, got {dtype}")
         space = cfg.get("space", "ub")
-        values = [round_dtype(float(x), dtype) for x in cfg.get("values", [])]
+        values = [round_dtype(x, dtype) for x in cfg.get("values", [])]
         size = cfg.get("size")
         if size is not None:
             if len(values) > size:
@@ -291,15 +296,15 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
         ub_dtype = case.get("ub_dtype", "f32")
         ub_dtypes = ("f32", "f16") if ub_dtype == "mixed" else (ub_dtype,)
         for dtype in ub_dtypes:
-            if dtype not in ("f32", "f16", "bf16", "u8", "s8"):
-                raise SimError(f"ub_dtype: only f32/f16/bf16/u8/s8/mixed are supported now, got {ub_dtype}")
+            if dtype not in ("f32", "f16", "bf16", "u32", "s32", "u8", "s8"):
+                raise SimError(f"ub_dtype: only f32/f16/bf16/u32/s32/u8/s8/mixed are supported now, got {ub_dtype}")
             element_bytes = dtype_bytes(dtype)
             if ub_size_bytes % element_bytes != 0:
                 raise SimError(f"ub_size_bytes must be divisible by {element_bytes} for {dtype}")
             name = "__ub" if len(ub_dtypes) == 1 else f"__ub_{dtype}"
             buffers[name] = Buffer(
                 name=name,
-                values=[0.0] * (ub_size_bytes // element_bytes),
+                values=[0] * (ub_size_bytes // element_bytes),
                 dtype=dtype,
                 space="ub",
             )
@@ -309,6 +314,8 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
 def dtype_bytes(dtype: str) -> int:
     if dtype == "f32":
         return F32_BYTES
+    if dtype in ("u32", "s32"):
+        return I32_BYTES
     if dtype == "f16":
         return F16_BYTES
     if dtype == "bf16":
@@ -337,18 +344,31 @@ def bf16(value: float) -> float:
     return struct.unpack("<f", struct.pack("<I", bf16_bits << 16))[0]
 
 
-def round_dtype(value: float, dtype: str) -> float:
+def u32(value: int | float) -> int:
+    return int(value) & 0xFFFFFFFF
+
+
+def s32(value: int | float) -> int:
+    raw = u32(value)
+    return raw - 0x100000000 if raw >= 0x80000000 else raw
+
+
+def round_dtype(value: Any, dtype: str) -> int | float:
     if dtype == "f32":
-        return f32(value)
+        return f32(float(value))
     if dtype == "f16":
-        return f16(value)
+        return f16(float(value))
     if dtype == "bf16":
-        return bf16(value)
+        return bf16(float(value))
+    if dtype == "u32":
+        return u32(value)
+    if dtype == "s32":
+        return s32(value)
     if dtype == "u8":
-        return float(int(value) & 0xFF)
+        return int(value) & 0xFF
     if dtype == "s8":
         raw = int(value) & 0xFF
-        return float(raw - 256 if raw >= 128 else raw)
+        return raw - 256 if raw >= 128 else raw
     raise SimError(f"unsupported dtype {dtype}")
 
 
@@ -766,6 +786,7 @@ class DavVAddSim:
         if name in (
             "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
             "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f16.DV",
+            "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV",
             "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
         ):
             if len(args) != 4:
@@ -773,6 +794,8 @@ class DavVAddSim:
             src, src_base = self._resolve_pointer(args[1], "gm")
             if ".f16." in name:
                 expected_dtype = "f16"
+            elif ".s32." in name:
+                expected_dtype = src.dtype if src.dtype in ("u32", "s32") else "s32"
             elif ".s8." in name:
                 expected_dtype = src.dtype if src.dtype in ("bf16", "u8") else "u8"
             else:
@@ -797,8 +820,8 @@ class DavVAddSim:
             byte_count = self._dma_out_byte_count(args[2])
             raw_descriptor = self._as_int(args[2], "MOV.UB.TO.OUT descriptor")
             low_count = raw_descriptor & 0xFFFF
-            if src.dtype == "bf16" and raw_descriptor >> 56 and low_count:
-                byte_count = low_count * BF16_BYTES
+            if src.dtype in ("bf16", "u32", "s32") and raw_descriptor >> 56 and low_count:
+                byte_count = low_count * DMA_V2_LOW_COUNT_BYTES
             self._copy_typed(src, src_base, dst, dst_base, byte_count, "MOV.UB.TO.OUT")
             self.trace.append(
                 f"MOV.UB.TO.OUT UB[{src_base}:{src_base + byte_count}] -> "
@@ -822,6 +845,24 @@ class DavVAddSim:
             start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V64F32, "vldsx1")
             self.values[lhs] = list(buf.values[start : start + LANES_F32_V64])
             self.trace.append(f"{lhs} = vldsx1(UB, byte_offset={base_byte + byte_offset})")
+            return
+
+        if name == "@llvm.hivm.vldsx1.v64s32":
+            if lhs is None:
+                raise SimError("vldsx1 result is unused")
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u32")
+            if buf.dtype not in ("u32", "s32"):
+                raise SimError(f"{name}: expected 32-bit integer UB buffer, got {buf.dtype}")
+            byte_offset = self._as_int(args[1], "vldsx1 byte offset")
+            norm = self._as_int(args[2], "vldsx1 norm")
+            postupdate = self._as_int(args[3], "vldsx1 postupdate")
+            if norm != 0 or postupdate != 0:
+                raise SimError("vldsx1 s32 milestone supports norm=0 and postupdate=0 only")
+            start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V64I32, "vldsx1")
+            self.values[lhs] = [u32(x) for x in buf.values[start : start + LANES_I32_V64]]
+            self.trace.append(f"{lhs} = vldsx1.s32(UB, byte_offset={base_byte + byte_offset})")
             return
 
         if name == "@llvm.hivm.vldsx1.v128f16":
@@ -974,10 +1015,16 @@ class DavVAddSim:
             if len(args) != 3:
                 raise SimError(f"{name}: expected 3 args, got {len(args)}")
             op_label = SELECT_VECTOR_OPS[name]
-            left = self._as_vector(args[0], f"{op_label} true value")
-            right = self._as_vector(args[1], f"{op_label} false value")
-            pred = self._as_mask(args[2], f"{op_label} predicate")
-            self.values[lhs] = self._map_select_vector(left, right, pred)
+            if name == "@llvm.hivm.vsel.v64i32":
+                left = self._as_u32_vector(args[0], f"{op_label} true value")
+                right = self._as_u32_vector(args[1], f"{op_label} false value")
+                pred = self._as_mask(args[2], f"{op_label} predicate", lanes=LANES_I32_V64)
+                self.values[lhs] = self._map_select_i32(left, right, pred)
+            else:
+                left = self._as_vector(args[0], f"{op_label} true value")
+                right = self._as_vector(args[1], f"{op_label} false value")
+                pred = self._as_mask(args[2], f"{op_label} predicate")
+                self.values[lhs] = self._map_select_vector(left, right, pred)
             self.trace.append(
                 f"{lhs} = {op_label}({args[0].value}, {args[1].value}, {args[2].value})"
             )
@@ -1056,6 +1103,54 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = vdups({scalar}, {args[1].value}, {pattern})")
             return
 
+        if name == "@llvm.hivm.vdups.z.v64i32":
+            if lhs is None:
+                raise SimError("vdups result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            scalar = self._as_int(args[0], "vdups scalar")
+            mask = self._as_mask(args[1], "vdups mask", lanes=LANES_I32_V64)
+            pattern = self._as_int(args[2], "vdups pattern")
+            if pattern != 0:
+                raise SimError("vdups i32 milestone supports pattern=0 only")
+            self.values[lhs] = [u32(scalar) if active else 0 for active in mask]
+            self.trace.append(f"{lhs} = vdups.i32({scalar}, {args[1].value}, {pattern})")
+            return
+
+        if name in (
+            "@llvm.hivm.vaddc.v64u32",
+            "@llvm.hivm.vsubc.v64u32",
+            "@llvm.hivm.vaddcs.v64u32",
+            "@llvm.hivm.vsubcs.v64u32",
+        ):
+            if lhs is None:
+                raise SimError(f"{name}: result is unused")
+            if name.endswith("cs.v64u32"):
+                if len(args) != 4:
+                    raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            elif len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            left = self._as_u32_vector(args[0], f"{name} lhs")
+            right = self._as_u32_vector(args[1], f"{name} rhs")
+            mask_arg = args[3] if name.endswith("cs.v64u32") else args[2]
+            mask = self._as_mask(mask_arg, f"{name} mask", lanes=LANES_I32_V64)
+            carry_in = None
+            if name.endswith("cs.v64u32"):
+                carry_in = self._as_mask(args[2], f"{name} carry predicate", lanes=LANES_I32_V64)
+            if ".vaddc." in name:
+                values, pred = self._addc_u32(left, right, mask)
+            elif ".vsubc." in name:
+                values, pred = self._subc_u32(left, right, mask)
+            elif ".vaddcs." in name:
+                assert carry_in is not None
+                values, pred = self._addcs_u32(left, right, carry_in, mask)
+            else:
+                assert carry_in is not None
+                values, pred = self._subcs_u32(left, right, carry_in, mask)
+            self.values[lhs] = AggregateValue([values, pred + [False] * (256 - LANES_I32_V64)])
+            self.trace.append(f"{lhs} = {name.rsplit('.', 1)[-1]}({args[0].value}, {args[1].value})")
+            return
+
         if name == "@llvm.hivm.vstsx1.v64f32":
             if len(args) != 6:
                 raise SimError(f"{name}: expected 6 args, got {len(args)}")
@@ -1076,6 +1171,30 @@ class DavVAddSim:
                     raise SimError(f"vstsx1 stores inactive/undefined lane {idx}")
                 buf.values[start + idx] = float(value)
             self.trace.append(f"vstsx1({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
+            return
+
+        if name == "@llvm.hivm.vstsx1.v64s32":
+            if len(args) != 6:
+                raise SimError(f"{name}: expected 6 args, got {len(args)}")
+            vec = self._as_u32_vector(args[0], "vstsx1 s32 value", allow_inactive=True)
+            buf, base_byte = self._resolve_pointer(args[1], "ub", preferred_dtype="u32")
+            if buf.dtype not in ("u32", "s32"):
+                raise SimError(f"{name}: expected 32-bit integer UB buffer, got {buf.dtype}")
+            byte_offset = self._as_int(args[2], "vstsx1 byte offset")
+            norm = self._as_int(args[3], "vstsx1 norm")
+            postupdate = self._as_int(args[4], "vstsx1 postupdate")
+            mask = self._as_mask(args[5], "vstsx1 s32 mask", lanes=LANES_I32_V64)
+            if norm not in (0, 2) or postupdate != 0:
+                raise SimError("vstsx1 s32 milestone supports norm=0/2 and postupdate=0 only")
+            start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V64I32, "vstsx1")
+            for idx, active in enumerate(mask):
+                if not active:
+                    continue
+                value = vec[idx]
+                if value is None:
+                    raise SimError(f"vstsx1 stores inactive/undefined lane {idx}")
+                buf.values[start + idx] = round_dtype(value, buf.dtype)
+            self.trace.append(f"vstsx1.s32({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
             return
 
         if name == "@llvm.hivm.vstsx1.v128f16":
@@ -1302,6 +1421,98 @@ class DavVAddSim:
                 raise SimError(f"vsel reads inactive source lane {idx}")
             result.append(f32(float(selected)))
         return result
+
+    def _map_select_i32(
+        self,
+        left: list[int | None],
+        right: list[int | None],
+        pred: list[bool],
+    ) -> list[int | None]:
+        result: list[int | None] = []
+        for idx, active in enumerate(pred):
+            selected = left[idx] if active else right[idx]
+            if selected is None:
+                raise SimError(f"vsel reads inactive source lane {idx}")
+            result.append(u32(selected))
+        return result
+
+    def _addc_u32(
+        self,
+        left: list[int | None],
+        right: list[int | None],
+        mask: list[bool],
+    ) -> tuple[list[int | None], list[bool]]:
+        values: list[int | None] = []
+        pred: list[bool] = []
+        for idx, active in enumerate(mask):
+            if not active:
+                values.append(None)
+                pred.append(False)
+                continue
+            total = u32(left[idx]) + u32(right[idx])
+            values.append(u32(total))
+            pred.append(total > 0xFFFFFFFF)
+        return values, pred
+
+    def _subc_u32(
+        self,
+        left: list[int | None],
+        right: list[int | None],
+        mask: list[bool],
+    ) -> tuple[list[int | None], list[bool]]:
+        values: list[int | None] = []
+        pred: list[bool] = []
+        for idx, active in enumerate(mask):
+            if not active:
+                values.append(None)
+                pred.append(False)
+                continue
+            lhs = u32(left[idx])
+            rhs = u32(right[idx])
+            values.append(u32(lhs - rhs))
+            pred.append(lhs >= rhs)
+        return values, pred
+
+    def _addcs_u32(
+        self,
+        left: list[int | None],
+        right: list[int | None],
+        carry_in: list[bool],
+        mask: list[bool],
+    ) -> tuple[list[int | None], list[bool]]:
+        values: list[int | None] = []
+        pred: list[bool] = []
+        for idx, active in enumerate(mask):
+            if not active:
+                values.append(None)
+                pred.append(False)
+                continue
+            total = u32(left[idx]) + u32(right[idx]) + (1 if carry_in[idx] else 0)
+            values.append(u32(total))
+            pred.append(total > 0xFFFFFFFF)
+        return values, pred
+
+    def _subcs_u32(
+        self,
+        left: list[int | None],
+        right: list[int | None],
+        carry_in: list[bool],
+        mask: list[bool],
+    ) -> tuple[list[int | None], list[bool]]:
+        values: list[int | None] = []
+        pred: list[bool] = []
+        for idx, active in enumerate(mask):
+            if not active:
+                values.append(None)
+                pred.append(False)
+                continue
+            lhs = u32(left[idx])
+            rhs = u32(right[idx])
+            borrow_in = 0 if carry_in[idx] else 1
+            total_rhs = rhs + borrow_in
+            values.append(u32(lhs - total_rhs))
+            pred.append(lhs >= total_rhs)
+        return values, pred
 
     def _map_diff_exp_vector(
         self,
@@ -1549,15 +1760,33 @@ class DavVAddSim:
         label: str,
         allow_inactive: bool = False,
         lanes: int = LANES_F32_V64,
-    ) -> list[float | None]:
+    ) -> list[int | float | None]:
         if not isinstance(value.value, str) or value.value not in self.values:
             raise SimError(f"{label}: unknown vector {value.value}")
         vec = self.values[value.value]
         if not isinstance(vec, list) or len(vec) != lanes:
-            raise SimError(f"{label}: expected vector<{lanes}xf32>")
+            raise SimError(f"{label}: expected vector<{lanes}>")
         if not allow_inactive and any(x is None for x in vec):
             raise SimError(f"{label}: vector contains inactive lanes")
         return vec
+
+    def _as_u32_vector(
+        self,
+        value: TypedValue,
+        label: str,
+        allow_inactive: bool = False,
+        lanes: int = LANES_I32_V64,
+    ) -> list[int | None]:
+        vec = self._as_vector(value, label, allow_inactive=allow_inactive, lanes=lanes)
+        result: list[int | None] = []
+        for idx, item in enumerate(vec):
+            if item is None:
+                result.append(None)
+                continue
+            if isinstance(item, bool):
+                raise SimError(f"{label}: lane {idx} is not an i32 value")
+            result.append(u32(item))
+        return result
 
     def _as_mask(self, value: TypedValue, label: str, lanes: int = LANES_F32_V64) -> list[bool]:
         if not isinstance(value.value, str) or value.value not in self.values:
