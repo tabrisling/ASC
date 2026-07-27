@@ -461,6 +461,18 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "opentile_vector_rsqrt_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vrsqrt",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "error"
+    },
+    {
       "name": "opentile_vector_rec_lowered_n64",
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "op": "vrec",
@@ -500,6 +512,18 @@
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
       "expect_asc_status": "pass"
+    },
+    {
+      "name": "opentile_vector_ln_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vln",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "error"
     },
     {
       "name": "opentile_vector_expdif_lowered_n64_part0",
@@ -1102,6 +1126,19 @@
       "expect_simulator_status": "pass"
     },
     {
+      "name": "opentile_vector_rsqrt_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vrsqrt",
+      "n_elements": 64,
+      "expect_simulator_status": "error",
+      "error_category": "simulator_instruction_error",
+      "error_signature": "RV_VRSQRT F32 unsupported"
+    },
+    {
       "name": "opentile_vector_exp_simulator_n64",
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "case_dir": "simulator/cases/vector_add",
@@ -1109,6 +1146,17 @@
       "core": "vec",
       "target": "dav-351x",
       "op": "vexp",
+      "n_elements": 64,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_ln_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vln",
       "n_elements": 64,
       "expect_simulator_status": "pass"
     },

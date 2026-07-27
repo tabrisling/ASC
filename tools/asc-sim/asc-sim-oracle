@@ -54,8 +54,10 @@ VECTOR_UNARY_INTRINSICS = {
     "vneg": "@llvm.hivm.vneg.x.v64f32",
     "vrelu": "@llvm.hivm.vrelu.x.v64f32",
     "vsqrt": "@llvm.hivm.vsqrt.x.v64f32",
+    "vrsqrt": "@llvm.hivm.vrsqrt.x.v64f32",
     "vrec": "@llvm.hivm.vrec.x.v64f32",
     "vexp": "@llvm.hivm.vexp.x.v64f32",
+    "vln": "@llvm.hivm.vln.x.v64f32",
 }
 
 VECTOR_SCALAR_INTRINSICS = {
@@ -385,6 +387,21 @@ def f32_sqrt(value: float) -> float:
     return f32(math.sqrt(value))
 
 
+def f32_rsqrt(value: float) -> float:
+    root = f32_sqrt(value)
+    return f32_div(1.0, root)
+
+
+def f32_ln(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    if value < 0.0:
+        return float("nan")
+    if value == 0.0:
+        return float("-inf")
+    return f32(math.log(value))
+
+
 def f32_exp(value: float) -> float:
     if math.isnan(value):
         return float("nan")
@@ -418,7 +435,7 @@ def pattern_to_mask(pattern: int) -> list[bool]:
 
 
 def generated_inputs(op: str, allocated_elements: int) -> tuple[list[float], list[float]]:
-    if op in ("vsqrt", "vrec"):
+    if op in ("vsqrt", "vrsqrt", "vrec", "vln"):
         x = [1.0 + float(i) * 0.125 for i in range(allocated_elements)]
     elif op in ("vexp", "vexpdif"):
         x = [float((i % 17) - 8) * 0.125 for i in range(allocated_elements)]
@@ -455,10 +472,14 @@ def eval_vector_op(op: str, a: float, b: float, scalar: float) -> float:
         return f32(max(a, 0.0))
     if op == "vsqrt":
         return f32_sqrt(a)
+    if op == "vrsqrt":
+        return f32_rsqrt(a)
     if op == "vrec":
         return f32_div(1.0, a)
     if op == "vexp":
         return f32_exp(a)
+    if op == "vln":
+        return f32_ln(a)
     if op == "vexpdif":
         return f32_exp(f32(a - b))
     if op == "vadds":
@@ -1095,10 +1116,14 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "        return np.maximum(x, np.float32(0.0))",
                 "    if OP == 'vsqrt':",
                 "        return np.sqrt(x)",
+                "    if OP == 'vrsqrt':",
+                "        return np.float32(1.0) / np.sqrt(x)",
                 "    if OP == 'vrec':",
                 "        return np.float32(1.0) / x",
                 "    if OP == 'vexp':",
                 "        return np.exp(x)",
+                "    if OP == 'vln':",
+                "        return np.log(x)",
                 "    if OP == 'vexpdif':",
                 "        if PART != 0:",
                 "            raise ValueError(f'unsupported vexpdif part: {PART}')",

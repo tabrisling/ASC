@@ -83,8 +83,10 @@ SUITE_OP_INTRINSICS = {
     "vneg": "@llvm.hivm.vneg.x.v64f32",
     "vrelu": "@llvm.hivm.vrelu.x.v64f32",
     "vsqrt": "@llvm.hivm.vsqrt.x.v64f32",
+    "vrsqrt": "@llvm.hivm.vrsqrt.x.v64f32",
     "vrec": "@llvm.hivm.vrec.x.v64f32",
     "vexp": "@llvm.hivm.vexp.x.v64f32",
+    "vln": "@llvm.hivm.vln.x.v64f32",
     "vadds": {
         "m": "@llvm.hivm.vadds.s.m.v64f32",
         "x": "@llvm.hivm.vadds.s.x.v64f32",
