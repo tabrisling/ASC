@@ -13,6 +13,7 @@ import argparse
 import json
 import math
 import re
+import struct
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,7 +132,7 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
         if dtype != "f32":
             raise SimError(f"buffer {name}: only f32 is supported now, got {dtype}")
         space = cfg.get("space", "ub")
-        values = [float(x) for x in cfg.get("values", [])]
+        values = [f32(float(x)) for x in cfg.get("values", [])]
         size = cfg.get("size")
         if size is not None:
             if len(values) > size:
@@ -149,6 +150,15 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
             space="ub",
         )
     return buffers
+
+
+def f32(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    try:
+        return struct.unpack("f", struct.pack("f", value))[0]
+    except OverflowError:
+        return math.copysign(float("inf"), value)
 
 
 def pattern_to_mask(pattern: int) -> list[bool]:
@@ -465,10 +475,11 @@ class DavVAddSim:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
             dst, dst_base = self._resolve_pointer(args[0], "gm")
             src, src_base = self._resolve_pointer(args[1], "ub")
-            self._copy_f32(src, src_base, dst, dst_base, self.dma_bytes, "MOV.UB.TO.OUT")
+            byte_count = self._dma_out_byte_count(args[2])
+            self._copy_f32(src, src_base, dst, dst_base, byte_count, "MOV.UB.TO.OUT")
             self.trace.append(
-                f"MOV.UB.TO.OUT UB[{src_base}:{src_base + self.dma_bytes}] -> "
-                f"{dst.name}[0:{self.dma_bytes}]"
+                f"MOV.UB.TO.OUT UB[{src_base}:{src_base + byte_count}] -> "
+                f"{dst.name}[0:{byte_count}]"
             )
             return
 
@@ -498,7 +509,7 @@ class DavVAddSim:
             mask = self._as_mask(args[2], "vadd mask")
             result: list[float | None] = []
             for idx, active in enumerate(mask):
-                result.append(a[idx] + b[idx] if active else None)
+                result.append(f32(float(a[idx]) + float(b[idx])) if active else None)
             self.values[lhs] = result
             self.trace.append(f"{lhs} = vadd({args[0].value}, {args[1].value}, {args[2].value})")
             return
@@ -585,6 +596,13 @@ class DavVAddSim:
             return True
 
         return False
+
+    def _dma_out_byte_count(self, descriptor: TypedValue) -> int:
+        raw = self._as_int(descriptor, "MOV.UB.TO.OUT descriptor")
+        encoded = (raw >> 25) & 0x1FFFFF
+        if encoded == 0 and not self.case.get("allow_zero_dma", False):
+            raise SimError("MOV.UB.TO.OUT: zero-length DMA burst is illegal")
+        return encoded or self.dma_bytes
 
     def _execute_generic_call(self, lhs: str | None, name: str, arg_text: str) -> None:
         args = [parse_typed_value(a) for a in split_args(arg_text)]

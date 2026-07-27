@@ -6,9 +6,12 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
 import re
+import shutil
 import subprocess
+import struct
 import sys
 import tempfile
 import time
@@ -74,6 +77,9 @@ def run_asc_ir_case(
     )
     case_json = copy.deepcopy(load_json(case_path))
     deep_merge(case_json, case_cfg.get("case_overrides", {}))
+    generated = case_cfg.get("generated")
+    if generated:
+        apply_generated_asc_case(case_json, generated)
 
     work_ir = tmp_dir / f"{case_cfg['name']}.ll"
     work_case = tmp_dir / f"{case_cfg['name']}.case.json"
@@ -95,23 +101,80 @@ def run_asc_ir_case(
     }
 
 
-def generated_vadd_case(elements: int, ub_size_bytes: int, dma_bytes: int) -> dict[str, Any]:
-    x = [float(i) * 0.5 for i in range(elements)]
-    y = [7.0 - float(i) * 0.25 for i in range(elements)]
-    golden = [a + b for a, b in zip(x, y)]
+def generated_vadd_case(
+    n_elements: int,
+    allocated_elements: int,
+    ub_size_bytes: int,
+    dma_bytes: int,
+) -> dict[str, Any]:
+    x = [float(i) * 0.5 for i in range(allocated_elements)]
+    y = [7.0 - float(i) * 0.25 for i in range(allocated_elements)]
+    active = max(0, min(n_elements, allocated_elements))
+    golden = [0.0] * allocated_elements
+    for idx in range(active):
+        golden[idx] = x[idx] + y[idx]
     return {
         "entry": "add_kernel",
         "arguments": {"%0": "x", "%1": "y", "%2": "output"},
-        "scalars": {"%3": elements},
+        "scalars": {"%3": n_elements},
         "buffers": {
             "x": {"space": "gm", "dtype": "f32", "values": x},
             "y": {"space": "gm", "dtype": "f32", "values": y},
-            "output": {"space": "gm", "dtype": "f32", "size": elements},
+            "output": {"space": "gm", "dtype": "f32", "size": allocated_elements},
         },
         "ub_size_bytes": ub_size_bytes,
         "dma_bytes": dma_bytes,
         "checks": [{"buffer": "output", "golden": golden, "atol": 0, "rtol": 0}],
     }
+
+
+def f32(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    try:
+        return struct.unpack("f", struct.pack("f", value))[0]
+    except OverflowError:
+        return math.copysign(float("inf"), value)
+
+
+def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
+    if generated == "special_f32_64":
+        base_a = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            float("inf"),
+            float("-inf"),
+            float("nan"),
+            1.401298464324817e-45,
+            1.1754943508222875e-38,
+            3.4028234663852886e38,
+        ]
+        base_b = [
+            -0.0,
+            0.0,
+            -1.0,
+            1.0,
+            1.0,
+            -1.0,
+            2.0,
+            -1.401298464324817e-45,
+            1.1754943508222875e-38,
+            -3.4028234663852886e38,
+        ]
+        a = [f32(base_a[i % len(base_a)]) for i in range(64)]
+        b = [f32(base_b[i % len(base_b)]) for i in range(64)]
+    elif generated == "float32_overflow_64":
+        a = [f32(3.4028234663852886e38)] * 64
+        b = [f32(3.4028234663852886e38)] * 64
+    else:
+        raise RuntimeError(f"unknown generated ASC case: {generated}")
+
+    golden = [f32(float(x) + float(y)) for x, y in zip(a, b)]
+    case_json["buffers"]["a"]["values"] = a
+    case_json["buffers"]["b"]["values"] = b
+    case_json["checks"][0]["golden"] = golden
 
 
 def lower_opentile_case(
@@ -166,7 +229,8 @@ def run_lowered_case(
         tmp_dir / case_cfg["name"],
     )
     local_case = generated_vadd_case(
-        int(case_cfg.get("elements", 1024)),
+        int(case_cfg.get("n_elements", case_cfg.get("elements", 1024))),
+        int(case_cfg.get("allocated_elements", 1024)),
         int(case_cfg.get("ub_size_bytes", 12288)),
         int(case_cfg.get("dma_bytes", 4096)),
     )
@@ -196,9 +260,11 @@ def run_simulator_case(
     ssh: str,
     developer: str,
     launcher: str,
+    tmp_dir: Path,
 ) -> dict[str, Any]:
     script = opentileas_repo / "simulator" / "scripts" / "ascend_simu.py"
     run_id = safe_slug(f"asc-oracle-{case_cfg['name']}-{int(time.time())}")
+    case_dir = materialize_simulator_case(case_cfg, opentileas_repo, tmp_dir)
     cmd = [
         sys.executable,
         str(script),
@@ -218,7 +284,7 @@ def run_simulator_case(
         "--mlir",
         str(opentileas_repo / case_cfg["mlir"]),
         "--case-dir",
-        str(opentileas_repo / case_cfg["case_dir"]),
+        str(case_dir),
         "--config",
         case_cfg.get("config", "runner.json"),
         "--core",
@@ -240,6 +306,38 @@ def run_simulator_case(
         "stderr_tail": tail(result.stderr),
         "stdout_tail": tail(result.stdout),
     }
+
+
+def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, tmp_dir: Path) -> Path:
+    source = opentileas_repo / case_cfg["case_dir"]
+    if "n_elements" not in case_cfg:
+        return source
+
+    target = tmp_dir / f"simulator-{safe_slug(case_cfg['name'])}"
+    shutil.copytree(source, target)
+    runner_path = target / case_cfg.get("config", "runner.json")
+    runner = load_json(runner_path)
+    for arg in runner.get("args", []):
+        if arg.get("name") == "n_elements":
+            arg["value"] = int(case_cfg["n_elements"])
+    write_json(runner_path, runner)
+    (target / "golden.py").write_text(
+        "\n".join(
+            [
+                "import numpy as np",
+                "",
+                "",
+                "def add(x: np.ndarray, y: np.ndarray, n_elements: int) -> np.ndarray:",
+                "    n = max(0, min(int(n_elements), x.shape[0]))",
+                "    out = np.zeros_like(x, dtype=np.float32)",
+                "    out[:n] = x[:n] + y[:n]",
+                "    return out.astype(np.float32)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return target
 
 
 def safe_slug(text: str) -> str:
@@ -323,6 +421,7 @@ def main(argv: list[str]) -> int:
                         args.ssh,
                         args.developer,
                         args.launcher,
+                        tmp_dir,
                     )
                 )
 
