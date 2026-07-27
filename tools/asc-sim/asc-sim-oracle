@@ -145,6 +145,7 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.pset.b32",
     "@llvm.hivm.pldi.b8",
     "@llvm.hivm.plds.b8",
+    "@llvm.hivm.plt.b8.v300",
     "@llvm.hivm.plt.b16.v300",
     "@llvm.hivm.plt.b32.v300",
     "@llvm.hivm.psti.b8",
@@ -153,6 +154,8 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.pstu.b32",
     "@llvm.hivm.vldsx1.v128bf16",
     "@llvm.hivm.vldsx1.v128f16",
+    "@llvm.hivm.vldsx1.v128s16",
+    "@llvm.hivm.vldsx1.v256s8",
     "@llvm.hivm.vldsx1.v64f32",
     "@llvm.hivm.vldsx1.v64s32",
     "@llvm.hivm.vlrelu.x.v128f16",
@@ -213,6 +216,9 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vsel.v64f32",
     "@llvm.hivm.vsel.v64i32",
     "@llvm.hivm.vsldb",
+    "@llvm.hivm.vsqz.x.v128f16",
+    "@llvm.hivm.vsqz.x.v128i16",
+    "@llvm.hivm.vsqz.x.v256i8",
     "@llvm.hivm.vsqz.x.v64f32",
     "@llvm.hivm.vsqz.x.v64i32",
     "@llvm.hivm.vsubc.v64u32",
@@ -1325,17 +1331,17 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
             }
         )
         return
-    if generated in ("a5_stateful_store_f32_512", "a5_stateful_store_i32_512"):
-        if generated == "a5_stateful_store_f32_512":
-            entry = "dav_stateful_store_f32"
-            data = [((idx * 73 + 19) % 251) for idx in range(256)]
-            active_bytes = 17 * 4
-            ub_dtypes = ["u8", "f32"]
-        else:
-            entry = "dav_stateful_store_i32"
-            data = [((idx * 31 + 47) % 251) for idx in range(256)]
-            active_bytes = 19 * 4
-            ub_dtypes = ["u8", "u32"]
+    stateful_store_cases = {
+        "a5_stateful_store_f16_512": ("dav_stateful_store_f16", 73, 19, 33 * 2, ["u8", "f16"]),
+        "a5_stateful_store_bf16_512": ("dav_stateful_store_bf16", 43, 29, 35 * 2, ["u8", "u16"]),
+        "a5_stateful_store_f32_512": ("dav_stateful_store_f32", 73, 19, 17 * 4, ["u8", "f32"]),
+        "a5_stateful_store_i16_512": ("dav_stateful_store_i16", 59, 7, 37 * 2, ["u8", "u16"]),
+        "a5_stateful_store_i32_512": ("dav_stateful_store_i32", 31, 47, 19 * 4, ["u8", "u32"]),
+        "a5_stateful_store_i8_512": ("dav_stateful_store_i8", 73, 19, 65, ["u8"]),
+    }
+    if generated in stateful_store_cases:
+        entry, mul, add, active_bytes, ub_dtypes = stateful_store_cases[generated]
+        data = [((idx * mul + add) % 251) for idx in range(256)]
         seed_vstus = [0xA5] * 256
         seed_vstur = [0x5A] * 256
         first = list(seed_vstus)

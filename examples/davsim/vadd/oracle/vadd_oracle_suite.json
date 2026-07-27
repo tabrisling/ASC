@@ -511,6 +511,106 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "gm_ub_register_a5_stateful_store_f16_512",
+      "ir": "../stateful_store_tail.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.init.vector.align.data",
+        "@llvm.hivm.plt.b16.v300",
+        "@llvm.hivm.sprclr",
+        "@llvm.hivm.vldsx1.v128f16",
+        "@llvm.hivm.vsqz.x.v128f16",
+        "@llvm.hivm.vstar",
+        "@llvm.hivm.vstas",
+        "@llvm.hivm.vstur",
+        "@llvm.hivm.vstus"
+      ],
+      "generated": "a5_stateful_store_f16_512",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "gm_ub_register_a5_stateful_store_bf16_512",
+      "ir": "../stateful_store_tail.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.init.vector.align.data",
+        "@llvm.hivm.plt.b16.v300",
+        "@llvm.hivm.sprclr",
+        "@llvm.hivm.vldsx1.v128s16",
+        "@llvm.hivm.vsqz.x.v128i16",
+        "@llvm.hivm.vstar",
+        "@llvm.hivm.vstas",
+        "@llvm.hivm.vstur",
+        "@llvm.hivm.vstus"
+      ],
+      "generated": "a5_stateful_store_bf16_512",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "gm_ub_register_a5_stateful_store_i16_512",
+      "ir": "../stateful_store_tail.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.init.vector.align.data",
+        "@llvm.hivm.plt.b16.v300",
+        "@llvm.hivm.sprclr",
+        "@llvm.hivm.vldsx1.v128s16",
+        "@llvm.hivm.vsqz.x.v128i16",
+        "@llvm.hivm.vstar",
+        "@llvm.hivm.vstas",
+        "@llvm.hivm.vstur",
+        "@llvm.hivm.vstus"
+      ],
+      "generated": "a5_stateful_store_i16_512",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "gm_ub_register_a5_stateful_store_i8_512",
+      "ir": "../stateful_store_tail.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.init.vector.align.data",
+        "@llvm.hivm.plt.b8.v300",
+        "@llvm.hivm.sprclr",
+        "@llvm.hivm.vldsx1.v256s8",
+        "@llvm.hivm.vsqz.x.v256i8",
+        "@llvm.hivm.vstar",
+        "@llvm.hivm.vstas",
+        "@llvm.hivm.vstur",
+        "@llvm.hivm.vstus"
+      ],
+      "generated": "a5_stateful_store_i8_512",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "gm_ub_register_a5_predicate_widths_256",
       "ir": "../predicate_widths.ll",
       "case": "../vadd.case.json",
@@ -2650,7 +2750,8 @@
       "core": "vec",
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "static_unsupported",
+      "expect_asc_status": "pass",
+      "require_simulator": false,
       "expect_simulator_status": "pass",
       "intrinsics": [
         "@llvm.hivm.BARRIER",
@@ -3024,7 +3125,7 @@
       "core": "vec",
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "static_unsupported",
+      "expect_asc_status": "pass",
       "expect_simulator_status": "pass",
       "intrinsics": [
         "@llvm.hivm.BARRIER",
@@ -3041,7 +3142,8 @@
         "@llvm.hivm.vstas",
         "@llvm.hivm.vstur",
         "@llvm.hivm.vstus"
-      ]
+      ],
+      "require_simulator": false
     },
     {
       "name": "opentile_a5_stateful_store_f32",
@@ -3079,7 +3181,7 @@
       "core": "vec",
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "static_unsupported",
+      "expect_asc_status": "pass",
       "expect_simulator_status": "pass",
       "intrinsics": [
         "@llvm.hivm.BARRIER",
@@ -3096,7 +3198,8 @@
         "@llvm.hivm.vstas",
         "@llvm.hivm.vstur",
         "@llvm.hivm.vstus"
-      ]
+      ],
+      "require_simulator": false
     },
     {
       "name": "opentile_a5_stateful_store_i32",
@@ -3134,7 +3237,7 @@
       "core": "vec",
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "static_unsupported",
+      "expect_asc_status": "pass",
       "expect_simulator_status": "pass",
       "intrinsics": [
         "@llvm.hivm.BARRIER",
@@ -3151,7 +3254,8 @@
         "@llvm.hivm.vstas",
         "@llvm.hivm.vstur",
         "@llvm.hivm.vstus"
-      ]
+      ],
+      "require_simulator": false
     },
     {
       "name": "opentile_a5_vbitsort_f16",

@@ -721,6 +721,10 @@ class DavVAddSim:
     def _write_ub_bytes(self, byte_offset: int, values: list[int], op: str) -> None:
         byte_view = self.buffers.get("__ub_u8") or self.buffers.get("__ub_s8")
         if byte_view is None:
+            default_ub = self.buffers.get("__ub")
+            if default_ub is not None and default_ub.dtype in ("u8", "s8"):
+                byte_view = default_ub
+        if byte_view is None:
             raise SimError(f"{op}: UB has no byte view")
         start = self._check_region(byte_view, byte_offset, len(values), op, alignment=1)
         byte_view.values[start : start + len(values)] = [int(x) & 0xFF for x in values]
@@ -1439,21 +1443,62 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = vldsx1.bf16(UB, byte_offset={base_byte + byte_offset})")
             return
 
+        if name == "@llvm.hivm.vldsx1.v128s16":
+            if lhs is None:
+                raise SimError("vldsx1 result is unused")
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u16")
+            if buf.dtype not in ("u16", "s16"):
+                raise SimError(f"{name}: expected 16-bit integer UB buffer, got {buf.dtype}")
+            byte_offset = self._as_int(args[1], "vldsx1 byte offset")
+            norm = self._as_int(args[2], "vldsx1 norm")
+            postupdate = self._as_int(args[3], "vldsx1 postupdate")
+            if norm != 0 or postupdate != 0:
+                raise SimError("vldsx1 s16 milestone supports norm=0 and postupdate=0 only")
+            start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V128I16, "vldsx1")
+            self.values[lhs] = list(buf.values[start : start + LANES_I16_V128])
+            self.trace.append(f"{lhs} = vldsx1.s16(UB, byte_offset={base_byte + byte_offset})")
+            return
+
+        if name == "@llvm.hivm.vldsx1.v256s8":
+            if lhs is None:
+                raise SimError("vldsx1 result is unused")
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u8")
+            if buf.dtype not in ("u8", "s8"):
+                raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
+            byte_offset = self._as_int(args[1], "vldsx1 byte offset")
+            norm = self._as_int(args[2], "vldsx1 norm")
+            postupdate = self._as_int(args[3], "vldsx1 postupdate")
+            if norm != 0 or postupdate != 0:
+                raise SimError("vldsx1 s8 milestone supports norm=0 and postupdate=0 only")
+            start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V256I8, "vldsx1")
+            self.values[lhs] = list(buf.values[start : start + LANES_I8_V256])
+            self.trace.append(f"{lhs} = vldsx1.s8(UB, byte_offset={base_byte + byte_offset})")
+            return
+
         if name in (
             "@llvm.hivm.vsqz.x.v64f32",
             "@llvm.hivm.vsqz.x.v64i32",
+            "@llvm.hivm.vsqz.x.v128f16",
+            "@llvm.hivm.vsqz.x.v128i16",
+            "@llvm.hivm.vsqz.x.v256i8",
         ):
             if lhs is None:
                 raise SimError("vsqz result is unused")
             if len(args) != 3:
                 raise SimError(f"{name}: expected 3 args, got {len(args)}")
-            mask = self._as_mask(args[1], "vsqz mask", lanes=LANES_F32_V64)
+            lanes = self._stateful_vector_lanes(line)
+            bytes_per_lane = self._stateful_vector_bytes_per_lane(line)
+            mask = self._as_mask(args[1], "vsqz mask", lanes=lanes)
             part = self._as_int(args[2], "vsqz part")
             if part != 1:
                 raise SimError("vsqz stateful-store milestone supports part=1 only")
-            active = self._prefix_active_lanes(mask, LANES_F32_V64, "vsqz")
+            active = self._prefix_active_lanes(mask, lanes, "vsqz")
             raw = self._serialized_vector_bytes(args[0], line, "vsqz input")
-            self.values[lhs] = PackedBytes(raw[: active * F32_BYTES])
+            self.values[lhs] = PackedBytes(raw[: active * bytes_per_lane])
             self.trace.append(f"{lhs} = vsqz(active_lanes={active})")
             return
 
@@ -2242,7 +2287,38 @@ class DavVAddSim:
         if "<64 x i32>" in line:
             vec = self._as_u32_vector(value, label, lanes=LANES_I32_V64)
             return [byte for lane in vec for byte in u32_to_le_bytes(lane)]
+        if "<128 x half>" in line:
+            vec = self._as_vector(value, label, lanes=LANES_F16_V128)
+            return [byte for lane in vec for byte in f16_to_le_bytes(lane)]
+        if "<128 x i16>" in line:
+            vec = self._as_u16_vector(value, label, lanes=LANES_I16_V128)
+            return [byte for lane in vec for byte in u16_to_le_bytes(lane)]
+        if "<256 x i8>" in line:
+            vec = self._as_u8_vector(value, label, lanes=LANES_I8_V256)
+            return [int(lane) & 0xFF for lane in vec]
         raise SimError(f"{label}: unsupported stateful vector type")
+
+    def _stateful_vector_lanes(self, line: str) -> int:
+        if "<64 x float>" in line or "<64 x i32>" in line:
+            return LANES_F32_V64
+        if "<128 x half>" in line:
+            return LANES_F16_V128
+        if "<128 x i16>" in line:
+            return LANES_I16_V128
+        if "<256 x i8>" in line:
+            return LANES_I8_V256
+        raise SimError("unsupported stateful vector type")
+
+    def _stateful_vector_bytes_per_lane(self, line: str) -> int:
+        if "<64 x float>" in line or "<64 x i32>" in line:
+            return F32_BYTES
+        if "<128 x half>" in line:
+            return F16_BYTES
+        if "<128 x i16>" in line:
+            return I16_BYTES
+        if "<256 x i8>" in line:
+            return I8_BYTES
+        raise SimError("unsupported stateful vector type")
 
     def _execute_scalar_or_pointer_line(self, line: str) -> bool:
         shufflevector = re.match(
