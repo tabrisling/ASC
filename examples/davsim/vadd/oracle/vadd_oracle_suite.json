@@ -2623,6 +2623,111 @@
         }
       },
       "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_p2_sync_control_unsupported",
+      "ir": "unsupported/p2_sync_control.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.SET.LOOP1.STRIDE.OUTTOUB",
+        "@llvm.hivm.SET.LOOP2.STRIDE.OUTTOUB",
+        "@llvm.hivm.SET.LOOP.SIZE.OUTTOUB",
+        "@llvm.hivm.SET.CROSS.CORE",
+        "@llvm.hivm.WAIT.FLAG.DEV.REG",
+        "@llvm.hivm.WAIT.FLAG.DEV.PIPE.IMM",
+        "@llvm.hivm.WAIT.FLAG.DEV.PIPE.REG",
+        "@llvm.hivm.mem.bar.vst.vld",
+        "@llvm.hivm.mem.bar.vld.vst",
+        "@llvm.hivm.mem.bar.vst.vst",
+        "@llvm.hivm.mem.bar.vs.all",
+        "@llvm.hivm.mem.bar.vst.ld",
+        "@llvm.hivm.mem.bar.vld.st",
+        "@llvm.hivm.mem.bar.vst.st",
+        "@llvm.hivm.mem.bar.sv.all",
+        "@llvm.hivm.mem.bar.st.vld",
+        "@llvm.hivm.mem.bar.ld.vst",
+        "@llvm.hivm.mem.bar.st.vst",
+        "@llvm.hivm.mem.bar.ss.all",
+        "@llvm.hivm.mem.bar.st.ld",
+        "@llvm.hivm.mem.bar.ld.st",
+        "@llvm.hivm.mem.bar.st.st"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_p2_gather_scatter_int_f8_unsupported",
+      "ir": "unsupported/p2_gather_scatter_int_f8.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vgather.v64i32",
+        "@llvm.hivm.vgather.v128i16",
+        "@llvm.hivm.vgather.v256i8",
+        "@llvm.hivm.vgather.v256f8e4m3fn",
+        "@llvm.hivm.vgather.v256f8e5m2",
+        "@llvm.hivm.vscatter.v64i32",
+        "@llvm.hivm.vscatter.v128i16",
+        "@llvm.hivm.vscatter.v256i8",
+        "@llvm.hivm.vscatter.v256f8e4m3fn",
+        "@llvm.hivm.vscatter.v256f8e5m2"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_p2_binary_wide_saturating_unsupported",
+      "ir": "unsupported/p2_binary_wide_saturating.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vmula.s.m",
+        "@llvm.hivm.vmull.s.m.v64i16",
+        "@llvm.hivm.vmull.s.x.v64i16",
+        "@llvm.hivm.vmull.s.z.v64i16",
+        "@llvm.hivm.vmull.u.m.v64i16",
+        "@llvm.hivm.vmull.u.x.v64i16",
+        "@llvm.hivm.vmull.u.z.v64i16",
+        "@llvm.hivm.vmull.s.m.v32i32",
+        "@llvm.hivm.vmull.s.x.v32i32",
+        "@llvm.hivm.vmull.s.z.v32i32",
+        "@llvm.hivm.vmull.u.m.v32i32",
+        "@llvm.hivm.vmull.u.x.v32i32",
+        "@llvm.hivm.vmull.u.z.v32i32",
+        "@llvm.hivm.sadd.v128s16.m",
+        "@llvm.hivm.sadd.v128s16.x",
+        "@llvm.hivm.sadd.v128s16.z",
+        "@llvm.hivm.ssub.v128s16.m",
+        "@llvm.hivm.ssub.v128s16.x",
+        "@llvm.hivm.ssub.v128s16.z"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
     }
   ],
   "lowered_cases": [
@@ -5456,6 +5561,108 @@
         "@llvm.hivm.roundy",
         "@llvm.hivm.floory",
         "@llvm.hivm.ceily"
+      ],
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_p2_sync_control_simulator_n64",
+      "ir": "unsupported/p2_sync_control.ll",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "sync_control",
+      "suite_op": false,
+      "simulator_dtype": "float32",
+      "simulator_shape": 64,
+      "vector_lanes": 64,
+      "n_elements": 64,
+      "intrinsics": [
+        "@llvm.hivm.SET.LOOP1.STRIDE.OUTTOUB",
+        "@llvm.hivm.SET.LOOP2.STRIDE.OUTTOUB",
+        "@llvm.hivm.SET.LOOP.SIZE.OUTTOUB",
+        "@llvm.hivm.SET.CROSS.CORE",
+        "@llvm.hivm.WAIT.FLAG.DEV.REG",
+        "@llvm.hivm.WAIT.FLAG.DEV.PIPE.IMM",
+        "@llvm.hivm.WAIT.FLAG.DEV.PIPE.REG",
+        "@llvm.hivm.mem.bar.vst.vld",
+        "@llvm.hivm.mem.bar.vld.vst",
+        "@llvm.hivm.mem.bar.vst.vst",
+        "@llvm.hivm.mem.bar.vs.all",
+        "@llvm.hivm.mem.bar.vst.ld",
+        "@llvm.hivm.mem.bar.vld.st",
+        "@llvm.hivm.mem.bar.vst.st",
+        "@llvm.hivm.mem.bar.sv.all",
+        "@llvm.hivm.mem.bar.st.vld",
+        "@llvm.hivm.mem.bar.ld.vst",
+        "@llvm.hivm.mem.bar.st.vst",
+        "@llvm.hivm.mem.bar.ss.all",
+        "@llvm.hivm.mem.bar.st.ld",
+        "@llvm.hivm.mem.bar.ld.st",
+        "@llvm.hivm.mem.bar.st.st"
+      ],
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_p2_gather_scatter_int_f8_simulator_n64",
+      "ir": "unsupported/p2_gather_scatter_int_f8.ll",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "gather_scatter_int_f8",
+      "suite_op": false,
+      "simulator_dtype": "float32",
+      "simulator_shape": 64,
+      "vector_lanes": 64,
+      "n_elements": 64,
+      "intrinsics": [
+        "@llvm.hivm.vgather.v64i32",
+        "@llvm.hivm.vgather.v128i16",
+        "@llvm.hivm.vgather.v256i8",
+        "@llvm.hivm.vgather.v256f8e4m3fn",
+        "@llvm.hivm.vgather.v256f8e5m2",
+        "@llvm.hivm.vscatter.v64i32",
+        "@llvm.hivm.vscatter.v128i16",
+        "@llvm.hivm.vscatter.v256i8",
+        "@llvm.hivm.vscatter.v256f8e4m3fn",
+        "@llvm.hivm.vscatter.v256f8e5m2"
+      ],
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_p2_binary_wide_saturating_simulator_n64",
+      "ir": "unsupported/p2_binary_wide_saturating.ll",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "binary_wide_saturating",
+      "suite_op": false,
+      "simulator_dtype": "float32",
+      "simulator_shape": 64,
+      "vector_lanes": 64,
+      "n_elements": 64,
+      "intrinsics": [
+        "@llvm.hivm.vmula.s.m",
+        "@llvm.hivm.vmull.s.m.v64i16",
+        "@llvm.hivm.vmull.s.x.v64i16",
+        "@llvm.hivm.vmull.s.z.v64i16",
+        "@llvm.hivm.vmull.u.m.v64i16",
+        "@llvm.hivm.vmull.u.x.v64i16",
+        "@llvm.hivm.vmull.u.z.v64i16",
+        "@llvm.hivm.vmull.s.m.v32i32",
+        "@llvm.hivm.vmull.s.x.v32i32",
+        "@llvm.hivm.vmull.s.z.v32i32",
+        "@llvm.hivm.vmull.u.m.v32i32",
+        "@llvm.hivm.vmull.u.x.v32i32",
+        "@llvm.hivm.vmull.u.z.v32i32",
+        "@llvm.hivm.sadd.v128s16.m",
+        "@llvm.hivm.sadd.v128s16.x",
+        "@llvm.hivm.sadd.v128s16.z",
+        "@llvm.hivm.ssub.v128s16.m",
+        "@llvm.hivm.ssub.v128s16.x",
+        "@llvm.hivm.ssub.v128s16.z"
       ],
       "expect_simulator_status": "error"
     }
