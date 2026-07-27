@@ -280,6 +280,8 @@ def case_intrinsics(case: dict[str, Any], *, include_suite_op: bool = True) -> s
 
 
 def case_kernel_intrinsics(case: dict[str, Any], section: str) -> set[str]:
+    if case.get("kernel_intrinsics") is False:
+        return set()
     if section == "asc_cases":
         return set(ASC_IR_KERNEL_INTRINSICS) if case.get("ir") else set()
     if section in ("lowered_cases", "simulator_cases") and "mlir" in case:

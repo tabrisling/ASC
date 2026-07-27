@@ -698,6 +698,36 @@ def patch_vector_compute_ir(
     return patched.replace(declare_source, declare_target, 1)
 
 
+def patch_vector_compute_probe_ir(case_cfg: dict[str, Any], ir_text: str) -> str:
+    intrinsic = case_cfg["probe_intrinsic"]
+    return_type = case_cfg["probe_return_type"]
+    source = VECTOR_BINARY_INTRINSICS["vadd"]
+    call_pattern = re.compile(
+        rf"(?P<lhs>%[-A-Za-z0-9_.$]+)\s*=\s*call\s+<64 x float>\s+{re.escape(source)}"
+        r"\(<64 x float>\s+%[-A-Za-z0-9_.$]+,\s+<64 x float>\s+%[-A-Za-z0-9_.$]+,\s+<256 x i1>\s+(?P<mask>%[-A-Za-z0-9_.$]+)\)"
+    )
+
+    def replace_call(match: re.Match[str]) -> str:
+        lhs = match.group("lhs")
+        mask = match.group("mask")
+        return (
+            f"{lhs} = call {return_type} {intrinsic}"
+            f"({return_type} undef, <256 x i1> {mask})"
+        )
+
+    patched, count = call_pattern.subn(replace_call, ir_text)
+    if count != 1:
+        raise RuntimeError(f"{case_cfg['name']}: expected one vector compute call to probe, found {count}")
+
+    declare_source = (
+        f"declare <64 x float> {source}(<64 x float>, <64 x float>, <256 x i1>)"
+    )
+    declare_target = f"declare {return_type} {intrinsic}({return_type}, <256 x i1>)"
+    if declare_source not in patched:
+        raise RuntimeError(f"{case_cfg['name']}: source declaration not found")
+    return patched.replace(declare_source, declare_target, 1)
+
+
 def patch_mask_patterns(ir_text: str, case_cfg: dict[str, Any]) -> str:
     if "mask_pattern" in case_cfg:
         new_pattern = int(case_cfg["mask_pattern"])
@@ -827,7 +857,9 @@ def materialize_lowered_ir(
     op = case_cfg.get("op", "vadd")
     text = lowered.read_text(encoding="utf-8")
     mode = case_cfg.get("mode", "x")
-    if op != "vadd" or mode != "x":
+    if "probe_intrinsic" in case_cfg:
+        text = patch_vector_compute_probe_ir(case_cfg, text)
+    elif op != "vadd" or mode != "x":
         text = patch_vector_compute_ir(
             case_cfg["name"],
             text,
@@ -993,6 +1025,19 @@ def simulator_case_needs_lowered_ir(case_cfg: dict[str, Any]) -> bool:
 
 def verify_materialized_ir(case_cfg: dict[str, Any], source_path: Path) -> None:
     text = source_path.read_text(encoding="utf-8", errors="ignore")
+    if "probe_intrinsic" in case_cfg:
+        expected = case_cfg["probe_intrinsic"]
+        if expected not in text:
+            raise RuntimeError(f"{case_cfg['name']}: materialized IR missing {expected}")
+        return
+    if "intrinsics" in case_cfg and case_cfg.get("op") is None:
+        for expected in (
+            name if name.startswith("@") else "@" + name
+            for name in case_cfg["intrinsics"]
+        ):
+            if expected not in text:
+                raise RuntimeError(f"{case_cfg['name']}: materialized IR missing {expected}")
+        return
     op = case_cfg.get("op", "vadd")
     mode = case_cfg.get("mode", "x")
     expected_intrinsic = op_intrinsic(op, mode)
@@ -1024,6 +1069,7 @@ def verify_materialized_ir(case_cfg: dict[str, Any], source_path: Path) -> None:
 
 def run_simulator_case(
     case_cfg: dict[str, Any],
+    suite_dir: Path,
     opentileas_repo: Path,
     build_dir: Path,
     ssh: str,
@@ -1036,9 +1082,14 @@ def run_simulator_case(
     expected = case_cfg.get("expect_simulator_status", "pass")
     try:
         case_dir = materialize_simulator_case(case_cfg, opentileas_repo, tmp_dir)
-        source_flag = "--mlir"
-        source_path = opentileas_repo / case_cfg["mlir"]
-        if simulator_case_needs_lowered_ir(case_cfg):
+        if "ir" in case_cfg:
+            source_flag = "--llvm-ir"
+            source_path = (suite_dir / case_cfg["ir"]).resolve()
+            verify_materialized_ir(case_cfg, source_path)
+        else:
+            source_flag = "--mlir"
+            source_path = opentileas_repo / case_cfg["mlir"]
+        if "ir" not in case_cfg and simulator_case_needs_lowered_ir(case_cfg):
             source_path, _ = materialize_lowered_ir(
                 case_cfg,
                 opentileas_repo,
@@ -1452,6 +1503,7 @@ def main(argv: list[str]) -> int:
                 results.append(
                     run_simulator_case(
                         case_cfg,
+                        suite_dir,
                         args.opentileas_repo.resolve(),
                         args.opentileas_build_dir.resolve(),
                         args.ssh,
@@ -1466,6 +1518,7 @@ def main(argv: list[str]) -> int:
                 results.append(
                     run_simulator_case(
                         external_cfg,
+                        suite_dir,
                         args.opentileas_repo.resolve(),
                         args.opentileas_build_dir.resolve(),
                         args.ssh,

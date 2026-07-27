@@ -129,6 +129,101 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "direct_ir_vcadd_f16_unsupported",
+      "ir": "unsupported/vcadd_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vcadd.s.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vcmax_f16_x_unsupported",
+      "ir": "unsupported/vcmax_f16_x.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vcmax.s.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vcmax_f16_m_unsupported",
+      "ir": "unsupported/vcmax_f16_m.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vcmax.s.m.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vcmin_f16_x_unsupported",
+      "ir": "unsupported/vcmin_f16_x.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vcmin.s.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vcmin_f16_m_unsupported",
+      "ir": "unsupported/vcmin_f16_m.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vcmin.s.m.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
       "name": "gm_ub_register_vmull_low_64",
       "ir": "../vadd.ll",
       "case": "../vadd.case.json",
@@ -1289,6 +1384,88 @@
       "target": "dav-351x",
       "op": "vcmin",
       "mode": "m",
+      "n_elements": 64,
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_vcadd_f16_simulator",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vcadd",
+      "probe_intrinsic": "@llvm.hivm.vcadd.s.x.v128f16",
+      "probe_return_type": "<128 x half>",
+      "intrinsics": [
+        "@llvm.hivm.vcadd.s.x.v128f16"
+      ],
+      "n_elements": 64,
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_vcmax_f16_x_simulator",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vcmax",
+      "probe_intrinsic": "@llvm.hivm.vcmax.s.x.v128f16",
+      "probe_return_type": "<128 x half>",
+      "intrinsics": [
+        "@llvm.hivm.vcmax.s.x.v128f16"
+      ],
+      "n_elements": 64,
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_vcmax_f16_m_simulator",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vcmax",
+      "mode": "m",
+      "probe_intrinsic": "@llvm.hivm.vcmax.s.m.v128f16",
+      "probe_return_type": "<128 x half>",
+      "intrinsics": [
+        "@llvm.hivm.vcmax.s.m.v128f16"
+      ],
+      "n_elements": 64,
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_vcmin_f16_x_simulator",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vcmin",
+      "probe_intrinsic": "@llvm.hivm.vcmin.s.x.v128f16",
+      "probe_return_type": "<128 x half>",
+      "intrinsics": [
+        "@llvm.hivm.vcmin.s.x.v128f16"
+      ],
+      "n_elements": 64,
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_vcmin_f16_m_simulator",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vcmin",
+      "mode": "m",
+      "probe_intrinsic": "@llvm.hivm.vcmin.s.m.v128f16",
+      "probe_return_type": "<128 x half>",
+      "intrinsics": [
+        "@llvm.hivm.vcmin.s.m.v128f16"
+      ],
       "n_elements": 64,
       "expect_simulator_status": "error"
     },
