@@ -44,6 +44,7 @@ MODEL_SUPPORTED = {
     "@llvm.hivm.vdups.z.v64f32",
     "@llvm.hivm.vsel.v64f32",
     "@llvm.hivm.vexpdif.v64f32",
+    "@llvm.hivm.vcadd.s.x.v64f32",
 }
 
 SUITE_OP_INTRINSICS = {
@@ -96,6 +97,7 @@ SUITE_OP_INTRINSICS = {
     "vdups": "@llvm.hivm.vdups.z.v64f32",
     "vsel": "@llvm.hivm.vsel.v64f32",
     "vexpdif": "@llvm.hivm.vexpdif.v64f32",
+    "vcadd": "@llvm.hivm.vcadd.s.x.v64f32",
 }
 
 

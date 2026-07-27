@@ -86,6 +86,10 @@ VECTOR_DIFF_EXP_INTRINSICS = {
     "vexpdif": "@llvm.hivm.vexpdif.v64f32",
 }
 
+VECTOR_REDUCTION_INTRINSICS = {
+    "vcadd": "@llvm.hivm.vcadd.s.x.v64f32",
+}
+
 
 def load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
@@ -227,6 +231,28 @@ def generated_vector_case(
     active = max(0, min(n_elements, allocated_elements))
     mask = pattern_to_mask(mask_pattern)
     golden = [0.0] * allocated_elements
+    if op == "vcadd":
+        for group_start in range(0, active, 64):
+            group_end = min(group_start + 64, active)
+            total = 0.0
+            for idx in range(group_start, group_end):
+                lane = idx % 64
+                if mask[lane]:
+                    total = f32(total + x[idx])
+            golden[group_start] = total
+        return {
+            "entry": "add_kernel",
+            "arguments": {"%0": "x", "%1": "y", "%2": "output"},
+            "scalars": {"%3": n_elements},
+            "buffers": {
+                "x": {"space": "gm", "dtype": "f32", "values": x},
+                "y": {"space": "gm", "dtype": "f32", "values": y},
+                "output": {"space": "gm", "dtype": "f32", "size": allocated_elements},
+            },
+            "ub_size_bytes": ub_size_bytes,
+            "dma_bytes": dma_bytes,
+            "checks": [{"buffer": "output", "golden": golden, "atol": 0, "rtol": 0}],
+        }
     for idx in range(active):
         lane = idx % 64
         if op == "vsel":
@@ -377,6 +403,8 @@ def eval_vector_op(op: str, a: float, b: float, scalar: float) -> float:
         return f32(min(a, scalar))
     if op == "vdups":
         return f32(scalar)
+    if op == "vcadd":
+        return f32(a)
     raise RuntimeError(f"unsupported vector op: {op}")
 
 
@@ -391,6 +419,16 @@ def apply_vector_op_case(
     b = [float(x) for x in case_json["buffers"]["b"]["values"]]
     mask = pattern_to_mask(mask_pattern)
     golden = []
+    if op == "vcadd":
+        for group_start in range(0, len(a), 64):
+            group = a[group_start : group_start + 64]
+            total = 0.0
+            for lane, x in enumerate(group):
+                if mask[lane]:
+                    total = f32(total + x)
+            golden.extend([total] + [0.0] * (len(group) - 1))
+        case_json["checks"][0]["golden"] = golden
+        return
     for idx, (x, y) in enumerate(zip(a, b)):
         if op == "vsel":
             golden.append(f32(x if mask[idx % 64] else y))
@@ -424,6 +462,7 @@ def op_intrinsic(op: str, mode: str = "x") -> str:
         VECTOR_DUP_INTRINSICS,
         VECTOR_SELECT_INTRINSICS,
         VECTOR_DIFF_EXP_INTRINSICS,
+        VECTOR_REDUCTION_INTRINSICS,
     ):
         if op in table:
             return table[op]
@@ -456,6 +495,8 @@ def patch_vector_compute_ir(
             return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <64 x float> {b}, <256 x i1> {mask})"
         if op in VECTOR_DIFF_EXP_INTRINSICS:
             return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <64 x float> {b}, <256 x i1> {mask}, i32 {part})"
+        if op in VECTOR_REDUCTION_INTRINSICS:
+            return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <256 x i1> {mask})"
         if op in VECTOR_UNARY_INTRINSICS:
             return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <256 x i1> {mask})"
         if op in VECTOR_SCALAR_INTRINSICS:
@@ -475,6 +516,8 @@ def patch_vector_compute_ir(
         declare_target = f"declare <64 x float> {target}(<64 x float>, <64 x float>, <256 x i1>)"
     elif op in VECTOR_DIFF_EXP_INTRINSICS:
         declare_target = f"declare <64 x float> {target}(<64 x float>, <64 x float>, <256 x i1>, i32)"
+    elif op in VECTOR_REDUCTION_INTRINSICS:
+        declare_target = f"declare <64 x float> {target}(<64 x float>, <256 x i1>)"
     elif op in VECTOR_UNARY_INTRINSICS:
         declare_target = f"declare <64 x float> {target}(<64 x float>, <256 x i1>)"
     elif op in VECTOR_SCALAR_INTRINSICS:
@@ -853,6 +896,8 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "        if PART != 0:",
                 "            raise ValueError(f'unsupported vexpdif part: {PART}')",
                 "        return np.exp(x - y)",
+                "    if OP == 'vcadd':",
+                "        return x",
                 "    if OP == 'vadds':",
                 "        return x + np.float32(SCALAR)",
                 "    if OP == 'vmuls':",
@@ -878,6 +923,12 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "            continue",
                 "        if OP == 'vsel':",
                 "            out[idx] = x[idx] if lane < compute_active else y[idx]",
+                "            continue",
+                "        if OP == 'vcadd':",
+                "            if lane == 0:",
+                "                end = min(idx + 64, n)",
+                "                active_end = min(idx + compute_active, end)",
+                "                out[idx] = np.sum(x[idx:active_end].astype(np.float32), dtype=np.float32)",
                 "            continue",
                 "        if lane < compute_active:",
                 "            out[idx] = computed[idx]",

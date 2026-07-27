@@ -110,6 +110,13 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "gm_ub_register_vcadd_64",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "op": "vcadd",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "gm_ub_register_vadds_64",
       "ir": "../vadd.ll",
       "case": "../vadd.case.json",
@@ -447,6 +454,30 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "opentile_vector_vcadd_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vcadd",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "opentile_vector_vcadd_lowered_n1024",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vcadd",
+      "n_elements": 1024,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "opentile_vector_adds_lowered_n64",
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "op": "vadds",
@@ -500,6 +531,19 @@
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "op": "vexpdif",
       "part": 0,
+      "mask_pattern": 8,
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "opentile_vector_vcadd_mask32_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vcadd",
       "mask_pattern": 8,
       "n_elements": 64,
       "allocated_elements": 1024,
@@ -905,6 +949,28 @@
       "n_elements": 64,
       "golden_atol": 1e-5,
       "golden_rtol": 1e-5,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_vcadd_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vcadd",
+      "n_elements": 64,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_vcadd_simulator_n1024",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vcadd",
+      "n_elements": 1024,
       "expect_simulator_status": "pass"
     },
     {
