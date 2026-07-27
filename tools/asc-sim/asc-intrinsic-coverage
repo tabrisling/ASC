@@ -226,7 +226,7 @@ def priority(name: str) -> str:
 
 def suite_intrinsics(suite: dict[str, Any]) -> set[str]:
     covered: set[str] = set()
-    for section in ("asc_cases", "lowered_cases", "simulator_cases"):
+    for section in ("asc_cases", "lowered_cases", "simulator_cases", "external_cases"):
         for case in suite.get(section, []):
             covered.update(case_intrinsics(case))
             covered.update(case_kernel_intrinsics(case, section))
@@ -285,6 +285,28 @@ def suite_evidence(suite: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
                     },
                 )
                 item[bucket].append(case["name"])
+    for case in suite.get("external_cases", []):
+        names = case_intrinsics(case)
+        for domain, status_key in (
+            ("asc", "expect_asc_status"),
+            ("simulator", "expect_simulator_status"),
+        ):
+            expected = case.get(status_key)
+            if expected is None:
+                continue
+            outcome = "pass" if expected == "pass" else "error"
+            bucket = f"{domain}_{outcome}"
+            for name in names:
+                item = evidence.setdefault(
+                    name,
+                    {
+                        "asc_pass": [],
+                        "asc_error": [],
+                        "simulator_pass": [],
+                        "simulator_error": [],
+                    },
+                )
+                item[bucket].append(case["name"])
     return evidence
 
 
@@ -309,8 +331,12 @@ def oracle_status(model: str, evidence: dict[str, list[str]] | None) -> str:
         if asc_pass:
             return "asc-pass-only"
         return "covered"
+    if asc_pass and simulator_error:
+        return "asc-pass-simulator-error"
     if asc_error and simulator_error:
         return "fail-closed"
+    if asc_error and simulator_pass:
+        return "model-gap"
     if asc_error:
         return "asc-error-only"
     if simulator_error:

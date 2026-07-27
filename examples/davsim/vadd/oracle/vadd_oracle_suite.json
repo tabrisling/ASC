@@ -1496,5 +1496,43 @@
       "n_elements": 1024,
       "expect_simulator_status": "pass"
     }
+  ],
+  "external_cases": [
+    {
+      "name": "opentile_a5_vgather2_matrix",
+      "mlir": "simulator/cases/a5_vgather2_matrix/kernel.cce.mlir",
+      "case_dir": "simulator/cases/a5_vgather2_matrix",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "error",
+      "expect_simulator_status": "pass",
+      "intrinsics": [
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.pset.b16",
+        "@llvm.hivm.pset.b32",
+        "@llvm.hivm.pset.b8",
+        "@llvm.hivm.vgather2.v300.v128bf16",
+        "@llvm.hivm.vgather2.v300.v128f16",
+        "@llvm.hivm.vgather2.v300.v128s16",
+        "@llvm.hivm.vgather2.v300.v128u16",
+        "@llvm.hivm.vgather2.v300.v256s8",
+        "@llvm.hivm.vgather2.v300.v256u8",
+        "@llvm.hivm.vgather2.v300.v64f32",
+        "@llvm.hivm.vgather2.v300.v64s32",
+        "@llvm.hivm.vgather2.v300.v64u32",
+        "@llvm.hivm.vldsx1.v64s32",
+        "@llvm.hivm.vstsx1.v128bf16",
+        "@llvm.hivm.vstsx1.v128f16",
+        "@llvm.hivm.vstsx1.v128s16",
+        "@llvm.hivm.vstsx1.v64f32",
+        "@llvm.hivm.vstsx1.v64s32"
+      ]
+    }
   ]
 }

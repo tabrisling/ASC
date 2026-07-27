@@ -96,6 +96,45 @@ VECTOR_VMULL_INTRINSICS = {
     ("vmull", "z"): "@llvm.hivm.vmull.s.z.v64f32",
 }
 
+ASC_MODEL_SUPPORTED_INTRINSICS = {
+    "@llvm.hivm.GET.BLOCK.IDX",
+    "@llvm.hivm.GET.CTRL",
+    "@llvm.hivm.SBITSET0",
+    "@llvm.hivm.SBITSET1",
+    "@llvm.hivm.SET.CTRL",
+    "@llvm.hivm.SET.FLAG.IMM",
+    "@llvm.hivm.WAIT.FLAG.IMM",
+    "@llvm.hivm.BARRIER",
+    "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
+    "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+    "@llvm.hivm.pset.b32",
+    "@llvm.hivm.vldsx1.v64f32",
+    "@llvm.hivm.vstsx1.v64f32",
+    "@llvm.hivm.vadd.v64f32.x",
+    "@llvm.hivm.vadd.s.x.v64f32",
+    "@llvm.hivm.vsub.s.x.v64f32",
+    "@llvm.hivm.vmul.s.x.v64f32",
+    "@llvm.hivm.vdiv.s.x.v64f32",
+    "@llvm.hivm.vmax.s.x.v64f32",
+    "@llvm.hivm.vmin.s.x.v64f32",
+    "@llvm.hivm.vabs.x.v64f32",
+    "@llvm.hivm.vneg.x.v64f32",
+    "@llvm.hivm.vrelu.x.v64f32",
+    "@llvm.hivm.vsqrt.x.v64f32",
+    "@llvm.hivm.vexp.x.v64f32",
+    "@llvm.hivm.vadds.s.x.v64f32",
+    "@llvm.hivm.vmuls.s.x.v64f32",
+    "@llvm.hivm.vmaxs.s.x.v64f32",
+    "@llvm.hivm.vmins.s.x.v64f32",
+    "@llvm.hivm.vbr.f32.v300",
+    "@llvm.hivm.vdups.z.v64f32",
+    "@llvm.hivm.vsel.v64f32",
+    "@llvm.hivm.vexpdif.v64f32",
+    "@llvm.hivm.vcadd.s.x.v64f32",
+}
+
+HIVM_INTRINSIC_RE = re.compile(r"@llvm\.hivm\.[A-Za-z0-9_.$]+")
+
 
 def load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
@@ -754,6 +793,76 @@ def materialize_lowered_ir(
     return patched, lower_result
 
 
+def extract_hivm_intrinsics(text: str) -> set[str]:
+    return set(HIVM_INTRINSIC_RE.findall(text))
+
+
+def run_external_asc_static_case(
+    case_cfg: dict[str, Any],
+    opentileas_repo: Path,
+    build_dir: Path,
+    tmp_dir: Path,
+) -> dict[str, Any]:
+    expected = case_cfg.get("expect_asc_status", "pass")
+    try:
+        lowered, lower_result = lower_opentile_case(
+            opentileas_repo,
+            build_dir,
+            (opentileas_repo / case_cfg["mlir"]).resolve(),
+            case_cfg.get("target", "dav-351x"),
+            case_cfg.get("fusion_mode", "no_fuse"),
+            tmp_dir / case_cfg["name"],
+        )
+        text = lowered.read_text(encoding="utf-8", errors="ignore")
+        found = extract_hivm_intrinsics(text)
+        configured = {
+            name if name.startswith("@") else "@" + name
+            for name in case_cfg.get("intrinsics", [])
+        }
+        missing_configured = sorted(configured - found)
+        unsupported = sorted(found - ASC_MODEL_SUPPORTED_INTRINSICS)
+        status = "pass"
+        if lower_result.returncode != 0 or unsupported or missing_configured:
+            status = "error"
+        details = []
+        if unsupported:
+            details.append("unsupported intrinsics: " + ", ".join(unsupported[:12]))
+            if len(unsupported) > 12:
+                details.append(f"... {len(unsupported) - 12} more unsupported intrinsics")
+        if missing_configured:
+            details.append("configured intrinsics missing from lowered IR: " + ", ".join(missing_configured))
+        if lower_result.returncode != 0:
+            details.append(tail(lower_result.stderr))
+        return {
+            "name": case_cfg["name"],
+            "kind": "external-asc-static",
+            "status": status,
+            "expected": expected,
+            "ok": status == expected,
+            "returncode": lower_result.returncode,
+            "lowered_ir": str(lowered),
+            "intrinsics": sorted(found),
+            "unsupported_intrinsics": unsupported,
+            "stderr_tail": "\n".join(part for part in details if part),
+            "stdout_tail": tail(lower_result.stdout),
+        }
+    except Exception as exc:
+        status = "error"
+        return {
+            "name": case_cfg["name"],
+            "kind": "external-asc-static",
+            "status": status,
+            "expected": expected,
+            "ok": status == expected,
+            "returncode": None,
+            "lowered_ir": None,
+            "intrinsics": [],
+            "unsupported_intrinsics": [],
+            "stderr_tail": f"external-case-error: {exc}",
+            "stdout_tail": "",
+        }
+
+
 def run_lowered_case(
     case_cfg: dict[str, Any],
     asc_sim: Path,
@@ -1152,8 +1261,29 @@ def main(argv: list[str]) -> int:
                         tmp_dir,
                     )
                 )
+            for case_cfg in suite.get("external_cases", []):
+                results.append(
+                    run_external_asc_static_case(
+                        case_cfg,
+                        args.opentileas_repo.resolve(),
+                        args.opentileas_build_dir.resolve(),
+                        tmp_dir,
+                    )
+                )
         if args.run_simulator:
             for case_cfg in suite.get("simulator_cases", []):
+                results.append(
+                    run_simulator_case(
+                        case_cfg,
+                        args.opentileas_repo.resolve(),
+                        args.opentileas_build_dir.resolve(),
+                        args.ssh,
+                        args.developer,
+                        args.launcher,
+                        tmp_dir,
+                    )
+                )
+            for case_cfg in suite.get("external_cases", []):
                 results.append(
                     run_simulator_case(
                         case_cfg,
