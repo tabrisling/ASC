@@ -106,6 +106,25 @@ SUITE_OP_INTRINSICS = {
     },
 }
 
+ASC_IR_KERNEL_INTRINSICS = {
+    "@llvm.hivm.GET.CTRL",
+    "@llvm.hivm.SBITSET0",
+    "@llvm.hivm.SET.CTRL",
+    "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
+    "@llvm.hivm.SET.FLAG.IMM",
+    "@llvm.hivm.WAIT.FLAG.IMM",
+    "@llvm.hivm.pset.b32",
+    "@llvm.hivm.vldsx1.v64f32",
+    "@llvm.hivm.vstsx1.v64f32",
+    "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+    "@llvm.hivm.BARRIER",
+}
+
+OPENTILE_VECTOR_KERNEL_INTRINSICS = ASC_IR_KERNEL_INTRINSICS | {
+    "@llvm.hivm.GET.BLOCK.IDX",
+    "@llvm.hivm.SBITSET1",
+}
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -210,6 +229,7 @@ def suite_intrinsics(suite: dict[str, Any]) -> set[str]:
     for section in ("asc_cases", "lowered_cases", "simulator_cases"):
         for case in suite.get(section, []):
             covered.update(case_intrinsics(case))
+            covered.update(case_kernel_intrinsics(case, section))
     return covered
 
 
@@ -232,6 +252,14 @@ def case_intrinsics(case: dict[str, Any]) -> set[str]:
     return names
 
 
+def case_kernel_intrinsics(case: dict[str, Any], section: str) -> set[str]:
+    if section == "asc_cases":
+        return set(ASC_IR_KERNEL_INTRINSICS) if case.get("ir") else set()
+    if section in ("lowered_cases", "simulator_cases") and "mlir" in case:
+        return set(OPENTILE_VECTOR_KERNEL_INTRINSICS)
+    return set()
+
+
 def suite_evidence(suite: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
     evidence: dict[str, dict[str, list[str]]] = {}
     sections = (
@@ -245,7 +273,8 @@ def suite_evidence(suite: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
             expected = case.get(status_key, "pass")
             outcome = "pass" if expected == "pass" else "error"
             bucket = f"{domain}_{outcome}"
-            for name in case_intrinsics(case):
+            names = case_intrinsics(case) | case_kernel_intrinsics(case, section)
+            for name in names:
                 item = evidence.setdefault(
                     name,
                     {
@@ -321,6 +350,11 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="fail if a P0 intrinsic has no ASC/simulator oracle evidence",
     )
+    parser.add_argument(
+        "--fail-on-supported-missing-oracle",
+        action="store_true",
+        help="fail if a model-supported intrinsic lacks a passing ASC+simulator oracle",
+    )
     args = parser.parse_args(argv)
 
     inventory = discover_intrinsics(args.opentileas_repo.resolve())
@@ -354,6 +388,10 @@ def main(argv: list[str]) -> int:
         item for item in data["intrinsics"]
         if item["priority"] == "P0" and item["oracle"] == "missing"
     ]
+    supported_missing_oracle = [
+        item for item in data["intrinsics"]
+        if item["model"] == "supported" and item["oracle"] != "pass-oracle"
+    ]
     if p0_missing:
         print("[P0 unsupported]")
         for item in p0_missing[:80]:
@@ -366,11 +404,19 @@ def main(argv: list[str]) -> int:
             print(f"  {item['intrinsic']} ({item['category']})")
         if len(p0_missing_oracle) > 80:
             print(f"  ... {len(p0_missing_oracle) - 80} more")
+    if supported_missing_oracle:
+        print("[supported missing pass oracle]")
+        for item in supported_missing_oracle[:80]:
+            print(f"  {item['intrinsic']} ({item['category']}, {item['oracle']})")
+        if len(supported_missing_oracle) > 80:
+            print(f"  ... {len(supported_missing_oracle) - 80} more")
     if args.json:
         args.json.resolve().write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if args.fail_on_p0_unsupported and p0_missing:
         return 1
     if args.fail_on_p0_missing_oracle and p0_missing_oracle:
+        return 1
+    if args.fail_on_supported_missing_oracle and supported_missing_oracle:
         return 1
     return 0
 
