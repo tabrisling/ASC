@@ -116,11 +116,14 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.SET.FLAG.IMM",
     "@llvm.hivm.WAIT.FLAG.IMM",
     "@llvm.hivm.BARRIER",
+    "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f16.DV",
     "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
     "@llvm.hivm.pset.b16",
     "@llvm.hivm.pset.b32",
+    "@llvm.hivm.plds.b8",
+    "@llvm.hivm.psts.b8",
     "@llvm.hivm.vldsx1.v128f16",
     "@llvm.hivm.vldsx1.v64f32",
     "@llvm.hivm.vstsx1.v128f16",
@@ -782,6 +785,31 @@ def patch_mask_patterns(ir_text: str, case_cfg: dict[str, Any]) -> str:
 
 
 def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
+    if generated == "a5_predicate_widths_256":
+        seed = [0xA5] * 256
+        for idx in range(32):
+            seed[idx] = (idx * 37 + 11) % 256
+            seed[32 + idx] = (idx * 53 + 7) % 256
+            seed[64 + idx] = (idx * 71 + 3) % 256
+        golden = list(seed)
+        for source, destination in ((0, 128), (32, 160), (64, 192)):
+            golden[destination : destination + 32] = golden[source : source + 32]
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_predicate_widths",
+                "arguments": {"%seed": "seed", "%output": "output"},
+                "buffers": {
+                    "seed": {"space": "gm", "dtype": "u8", "values": seed},
+                    "output": {"space": "gm", "dtype": "u8", "size": 256},
+                },
+                "ub_dtype": "u8",
+                "ub_size_bytes": 256,
+                "dma_bytes": 256,
+                "checks": [{"buffer": "output", "golden": golden, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
     if generated == "a5_vmulscvt_f16_64":
         values = [f32(((idx % 23) - 11) * 0.5) for idx in range(64)]
         for idx, value in ((0, -0.0), (1, 0.0), (2, 65504.0), (31, -65504.0), (32, 1.0), (63, -1.0)):

@@ -25,8 +25,10 @@ LANES_F16_V128 = 128
 LANES_F32_V128 = 128
 F32_BYTES = 4
 F16_BYTES = 2
+I8_BYTES = 1
 VECTOR_BYTES_V64F32 = LANES_F32_V64 * F32_BYTES
 VECTOR_BYTES_V128F16 = LANES_F16_V128 * F16_BYTES
+PREDICATE_BYTES_B8 = 32
 GM_ADDRSPACE = 1
 UB_ADDRSPACE = 6
 ALIGNMENT_BYTES = 32
@@ -138,6 +140,11 @@ class AggregateValue:
     elements: list[list[float | None]]
 
 
+@dataclass
+class PredicateBytes:
+    values: list[int]
+
+
 def strip_comment(line: str) -> str:
     return line.split(";", 1)[0].strip()
 
@@ -231,8 +238,8 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
     buffers: dict[str, Buffer] = {}
     for name, cfg in case.get("buffers", {}).items():
         dtype = cfg.get("dtype", "f32")
-        if dtype not in ("f32", "f16"):
-            raise SimError(f"buffer {name}: only f32/f16 are supported now, got {dtype}")
+        if dtype not in ("f32", "f16", "u8", "s8"):
+            raise SimError(f"buffer {name}: only f32/f16/u8/s8 are supported now, got {dtype}")
         space = cfg.get("space", "ub")
         values = [round_dtype(float(x), dtype) for x in cfg.get("values", [])]
         size = cfg.get("size")
@@ -246,8 +253,8 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
         ub_dtype = case.get("ub_dtype", "f32")
         ub_dtypes = ("f32", "f16") if ub_dtype == "mixed" else (ub_dtype,)
         for dtype in ub_dtypes:
-            if dtype not in ("f32", "f16"):
-                raise SimError(f"ub_dtype: only f32/f16/mixed are supported now, got {ub_dtype}")
+            if dtype not in ("f32", "f16", "u8", "s8"):
+                raise SimError(f"ub_dtype: only f32/f16/u8/s8/mixed are supported now, got {ub_dtype}")
             element_bytes = dtype_bytes(dtype)
             if ub_size_bytes % element_bytes != 0:
                 raise SimError(f"ub_size_bytes must be divisible by {element_bytes} for {dtype}")
@@ -266,6 +273,8 @@ def dtype_bytes(dtype: str) -> int:
         return F32_BYTES
     if dtype == "f16":
         return F16_BYTES
+    if dtype in ("u8", "s8"):
+        return I8_BYTES
     raise SimError(f"unsupported dtype {dtype}")
 
 
@@ -283,6 +292,11 @@ def round_dtype(value: float, dtype: str) -> float:
         return f32(value)
     if dtype == "f16":
         return f16(value)
+    if dtype == "u8":
+        return float(int(value) & 0xFF)
+    if dtype == "s8":
+        raw = int(value) & 0xFF
+        return float(raw - 256 if raw >= 128 else raw)
     raise SimError(f"unsupported dtype {dtype}")
 
 
@@ -652,11 +666,17 @@ class DavVAddSim:
         if name in (
             "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
             "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f16.DV",
+            "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
         ):
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
             src, src_base = self._resolve_pointer(args[1], "gm")
-            expected_dtype = "f16" if ".f16." in name else "f32"
+            if ".f16." in name:
+                expected_dtype = "f16"
+            elif ".s8." in name:
+                expected_dtype = "u8"
+            else:
+                expected_dtype = "f32"
             dst, dst_base = self._resolve_pointer(args[0], "ub", preferred_dtype=expected_dtype)
             if src.dtype != expected_dtype or dst.dtype != expected_dtype:
                 raise SimError(
@@ -716,6 +736,25 @@ class DavVAddSim:
             start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V128F16, "vldsx1")
             self.values[lhs] = list(buf.values[start : start + LANES_F16_V128])
             self.trace.append(f"{lhs} = vldsx1.f16(UB, byte_offset={base_byte + byte_offset})")
+            return
+
+        if name == "@llvm.hivm.plds.b8":
+            if lhs is None:
+                raise SimError("plds result is unused")
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u8")
+            if buf.dtype not in ("u8", "s8"):
+                raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
+            byte_offset = self._as_int(args[1], "plds byte offset")
+            dist = self._as_int(args[2], "plds dist")
+            postupdate = self._as_int(args[3], "plds postupdate")
+            if dist != 0 or postupdate != 0:
+                raise SimError("plds.b8 milestone supports dist=0 and postupdate=0 only")
+            start = self._check_region(buf, base_byte + byte_offset, PREDICATE_BYTES_B8, "plds.b8")
+            values = [int(x) & 0xFF for x in buf.values[start : start + PREDICATE_BYTES_B8]]
+            self.values[lhs] = PredicateBytes(values)
+            self.trace.append(f"{lhs} = plds.b8(UB, byte_offset={base_byte + byte_offset})")
             return
 
         if name in BINARY_VECTOR_OPS:
@@ -926,6 +965,24 @@ class DavVAddSim:
                     raise SimError(f"vstsx1 stores inactive/undefined lane {idx}")
                 buf.values[start + idx] = f16(float(value))
             self.trace.append(f"vstsx1.f16({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
+            return
+
+        if name == "@llvm.hivm.psts.b8":
+            if len(args) != 5:
+                raise SimError(f"{name}: expected 5 args, got {len(args)}")
+            pred = self._as_predicate_bytes(args[0], "psts predicate")
+            buf, base_byte = self._resolve_pointer(args[1], "ub", preferred_dtype="u8")
+            if buf.dtype not in ("u8", "s8"):
+                raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
+            byte_offset = self._as_int(args[2], "psts byte offset")
+            dist = self._as_int(args[3], "psts dist")
+            postupdate = self._as_int(args[4], "psts postupdate")
+            if dist != 0 or postupdate != 0:
+                raise SimError("psts.b8 milestone supports dist=0 and postupdate=0 only")
+            start = self._check_region(buf, base_byte + byte_offset, PREDICATE_BYTES_B8, "psts.b8")
+            for idx, value in enumerate(pred.values):
+                buf.values[start + idx] = round_dtype(value, buf.dtype)
+            self.trace.append(f"psts.b8({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
             return
 
         self.unsupported.append(name)
@@ -1293,6 +1350,14 @@ class DavVAddSim:
         if not all(isinstance(x, bool) for x in sliced):
             raise SimError(f"{label}: expected predicate mask")
         return sliced
+
+    def _as_predicate_bytes(self, value: TypedValue, label: str) -> PredicateBytes:
+        if not isinstance(value.value, str) or value.value not in self.values:
+            raise SimError(f"{label}: unknown predicate {value.value}")
+        pred = self.values[value.value]
+        if not isinstance(pred, PredicateBytes) or len(pred.values) != PREDICATE_BYTES_B8:
+            raise SimError(f"{label}: expected b8 predicate payload")
+        return pred
 
     def check(self) -> tuple[bool, list[str]]:
         failures: list[str] = []
