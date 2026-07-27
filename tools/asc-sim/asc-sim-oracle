@@ -550,19 +550,15 @@ def patch_vector_compute_ir(
                 ]
             )
         if op == "vmull":
-            if mode != "x":
-                return (
-                    f"{lhs} = call {{ <64 x float>, <64 x float> }} {target}"
-                    f"(<128 x float> undef, <128 x float> undef, <256 x i1> {mask}, <64 x float> undef)"
-                )
             shuffle_mask = ", ".join(f"i32 {idx}" for idx in range(128))
             suffix = re.sub(r"[^A-Za-z0-9_]+", "_", lhs.lstrip("%")).strip("_") or "result"
             vec_name = f"%asc_vmull_vec_{suffix}"
             agg_name = f"%asc_vmull_agg_{suffix}"
+            pass_thru = a if mode == "m" else "undef"
             return "\n".join(
                 [
                     f"{vec_name} = shufflevector <64 x float> {a}, <64 x float> {b}, <128 x i32> <{shuffle_mask}>",
-                    f"{agg_name} = call {{ <64 x float>, <64 x float> }} {target}(<128 x float> {vec_name}, <128 x float> {vec_name}, <256 x i1> {mask}, <64 x float> undef)",
+                    f"{agg_name} = call {{ <64 x float>, <64 x float> }} {target}(<128 x float> {vec_name}, <128 x float> {vec_name}, <256 x i1> {mask}, <64 x float> {pass_thru})",
                     f"{lhs} = extractvalue {{ <64 x float>, <64 x float> }} {agg_name}, {extract}",
                 ]
             )

@@ -541,6 +541,34 @@
       "expect_asc_status": "error"
     },
     {
+      "name": "opentile_vector_vmull_m_low_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vmull",
+      "mode": "m",
+      "extract": 0,
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "opentile_vector_vmull_z_low_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vmull",
+      "mode": "z",
+      "extract": 0,
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "error"
+    },
+    {
       "name": "opentile_vector_adds_lowered_n64",
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "op": "vadds",
@@ -1071,6 +1099,32 @@
       "target": "dav-351x",
       "op": "vmull",
       "extract": 1,
+      "n_elements": 64,
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "opentile_vector_vmull_m_low_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vmull",
+      "mode": "m",
+      "extract": 0,
+      "n_elements": 64,
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "opentile_vector_vmull_z_low_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vmull",
+      "mode": "z",
+      "extract": 0,
       "n_elements": 64,
       "expect_simulator_status": "error"
     },

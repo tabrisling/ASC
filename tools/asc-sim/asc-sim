@@ -67,7 +67,9 @@ REDUCTION_VECTOR_OPS = {
 }
 
 VMULL_VECTOR_OPS = {
+    "@llvm.hivm.vmull.s.m.v64f32": "vmull",
     "@llvm.hivm.vmull.s.x.v64f32": "vmull",
+    "@llvm.hivm.vmull.s.z.v64f32": "vmull",
 }
 
 BROADCAST_VECTOR_OPS = {
@@ -680,7 +682,7 @@ class DavVAddSim:
             return
 
         if name in VMULL_VECTOR_OPS:
-            raise SimError("vmull.x is fail-closed: dav-c310 ccec crashes on the materialized oracle IR")
+            raise SimError("vmull is fail-closed: dav-c310 ccec crashes on the materialized oracle IR")
 
         if name in BROADCAST_VECTOR_OPS:
             if lhs is None:
