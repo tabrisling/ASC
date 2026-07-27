@@ -176,7 +176,7 @@ def categorize(name: str) -> str:
         return "sync"
     if any(token in lowered for token in ("pld", "plt.", "pst", "pset", "sprclr", "init.vector.align")):
         return "predicate-state"
-    if any(token in lowered for token in ("vlds", "vldu", "vsts", "vstus", "vstur", "vstar", "vstas", "vsldb")):
+    if any(token in lowered for token in ("vlds", "vldu", "vldas", "vsts", "vstus", "vstur", "vstar", "vstas", "vsldb")):
         return "load-store"
     if any(token in lowered for token in ("vcvt", "vtrc", "vmulscvt")):
         return "convert"
@@ -190,7 +190,7 @@ def categorize(name: str) -> str:
         return "reduction"
     if any(token in lowered for token in ("vadds", "vmuls", "vmaxs", "vmins")):
         return "scalar-vector"
-    if any(token in lowered for token in ("vabs", "vneg", "vsqrt", "vrsqrt", "vrec", "vexp", "vln", "vrelu", "vnot")):
+    if any(token in lowered for token in ("vabs", "vneg", "vsqrt", "vrsqrt", "vrec", "vexp", "vln", "vrelu", "vlrelu", "vnot")):
         return "unary"
     if any(token in lowered for token in ("vaxpy", "vmadd")):
         return "fused-vector"
@@ -198,7 +198,7 @@ def categorize(name: str) -> str:
         return "binary"
     if "vdups" in lowered or "vbr" in lowered:
         return "broadcast"
-    if any(token in lowered for token in ("sort", "vbs", "sqz", "vmrg", "unpack", "pack")):
+    if any(token in lowered for token in ("sort", "vbs", "vms4", "sqz", "vmrg", "unpack", "pack")):
         return "rearrange-sort"
     return "unknown"
 
