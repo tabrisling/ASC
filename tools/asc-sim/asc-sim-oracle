@@ -141,6 +141,7 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vlrelu.x.v128f16",
     "@llvm.hivm.vstsx1.v128bf16",
     "@llvm.hivm.vstsx1.v128f16",
+    "@llvm.hivm.vstsx1.v128s16",
     "@llvm.hivm.vstsx1.v256s8",
     "@llvm.hivm.vstsx1.v64f32",
     "@llvm.hivm.vstsx1.v64s32",
@@ -175,6 +176,7 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vdups.z.v64f32",
     "@llvm.hivm.vdups.z.v64i32",
     "@llvm.hivm.vgatherb.v310.v256s8",
+    "@llvm.hivm.vgatherb.v310.v128s16",
     "@llvm.hivm.vgatherb.v310.v64s32",
     "@llvm.hivm.vsel.v64f32",
     "@llvm.hivm.vsel.v64i32",
@@ -1081,6 +1083,30 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
                     "out": {"space": "gm", "dtype": "u8", "size": 512},
                 },
                 "ub_dtypes": ["u8", "u32"],
+                "ub_size_bytes": 4096,
+                "dma_bytes": 256,
+                "checks": [{"buffer": "out", "golden": data + gathered, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
+    if generated == "a5_memory_blocks_i16_512":
+        data = [((idx * 37 + 11) % 251) for idx in range(256)]
+        offsets = [0] * 64
+        offsets[:8] = [224, 0, 96, 32, 192, 64, 160, 128]
+        gathered: list[int] = []
+        for offset in offsets[:8]:
+            gathered.extend(data[offset : offset + 32])
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_memory_blocks_i16",
+                "arguments": {"%data": "data", "%offsets": "offsets", "%out": "out"},
+                "buffers": {
+                    "data": {"space": "gm", "dtype": "u8", "values": data},
+                    "offsets": {"space": "gm", "dtype": "u32", "values": offsets},
+                    "out": {"space": "gm", "dtype": "u8", "size": 512},
+                },
+                "ub_dtypes": ["u8", "u32", "u16"],
                 "ub_size_bytes": 4096,
                 "dma_bytes": 256,
                 "checks": [{"buffer": "out", "golden": data + gathered, "atol": 0, "rtol": 0}],
