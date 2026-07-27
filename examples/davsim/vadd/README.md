@@ -35,3 +35,17 @@ build/bin/asc-sim-oracle
 
 Add `--run-simulator --ssh opentile-simu` to also upload the canonical
 OpenTileAS vector_add case to the remote simulator oracle.
+
+When an OpenTileAS simulator case fails, replay the configured failing cases
+through ASC preflight before spending more time on the remote simulator:
+
+```bash
+build/bin/asc-sim-oracle \
+  --replay-simulator-failures \
+  --enforce-simulator-failure-replay
+```
+
+This mode filters the suite to cases whose simulator oracle is expected to be
+`error` or `check_failed`, then verifies that ASC rejects them locally by static
+or runtime validation. Add `--run-simulator --ssh opentile-simu` when the remote
+failure should be refreshed and compared with the local ASC classification.

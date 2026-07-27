@@ -107,6 +107,22 @@ VECTOR_VMULL_INTRINSICS = {
     ("vmull", "z"): "@llvm.hivm.vmull.s.z.v64f32",
 }
 
+ASC_REJECT_STATUSES = {
+    "check_failed",
+    "coverage_config_error",
+    "error",
+    "lower_error",
+    "oracle_materialization_error",
+    "static_unsupported",
+}
+
+SIMULATOR_REJECT_STATUSES = {
+    "check_failed",
+    "error",
+    "oracle_materialization_error",
+    "timeout",
+}
+
 ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.GET.BLOCK.IDX",
     "@llvm.hivm.GET.CTRL",
@@ -1963,23 +1979,44 @@ def print_report(results: list[dict[str, Any]]) -> None:
 def oracle_key(case_cfg: dict[str, Any]) -> str:
     if case_cfg.get("kernel_id"):
         return str(case_cfg["kernel_id"])
-    fields = [
-        ("source", case_cfg.get("mlir") or case_cfg.get("ir")),
-        ("op", case_cfg.get("op", "vadd")),
-        ("mode", case_cfg.get("mode", "x")),
-        ("part", case_cfg.get("part") if case_cfg.get("op") == "vexpdif" else None),
-        ("extract", case_cfg.get("extract") if case_cfg.get("op") == "vmull" else None),
-        ("decompose_vrec", case_cfg.get("decompose_vrec") if case_cfg.get("op") == "vrec" else None),
-        ("mask", case_cfg.get("mask_pattern", 0)),
-        ("store_mask", case_cfg.get("store_mask_pattern", case_cfg.get("mask_pattern", 0))),
-        ("n", case_cfg.get("n_elements")),
-        ("alloc", case_cfg.get("allocated_elements", 1024)),
-        ("ub", case_cfg.get("ub_size_bytes", 12288)),
-        ("dma", case_cfg.get("dma_bytes", 4096)),
-        ("target", case_cfg.get("target", "dav-351x")),
-        ("core", case_cfg.get("core", "vec")),
-        ("fusion", case_cfg.get("fusion_mode", "no_fuse")),
-    ]
+    intrinsic_signature = None
+    if case_cfg.get("probe_intrinsic"):
+        intrinsic_signature = case_cfg["probe_intrinsic"]
+    elif case_cfg.get("intrinsics") and (
+        case_cfg.get("op") is None
+        or case_cfg.get("simulator_dtype")
+        or not case_cfg.get("suite_op", True)
+        or ("ir" in case_cfg and "case_dir" in case_cfg)
+    ):
+        intrinsic_signature = ",".join(sorted(case_cfg["intrinsics"]))
+    if intrinsic_signature:
+        fields = [
+            ("intrinsics", intrinsic_signature),
+            ("target", case_cfg.get("target", "dav-351x")),
+            ("core", case_cfg.get("core", "vec")),
+            ("fusion", case_cfg.get("fusion_mode", "no_fuse")),
+        ]
+    else:
+        fields = [
+            ("source", case_cfg.get("mlir") or case_cfg.get("ir")),
+            ("op", case_cfg.get("op", "vadd")),
+            ("dtype", case_cfg.get("simulator_dtype") or case_cfg.get("dtype")),
+            ("mode", case_cfg.get("mode", "x")),
+            ("part", case_cfg.get("part") if case_cfg.get("op") == "vexpdif" else None),
+            ("extract", case_cfg.get("extract") if case_cfg.get("op") == "vmull" else None),
+            ("decompose_vrec", case_cfg.get("decompose_vrec") if case_cfg.get("op") == "vrec" else None),
+            ("mask", case_cfg.get("mask_pattern", 0)),
+            ("store_mask", case_cfg.get("store_mask_pattern", case_cfg.get("mask_pattern", 0))),
+            ("n", case_cfg.get("n_elements")),
+            ("alloc", case_cfg.get("allocated_elements", 1024)),
+            ("shape", case_cfg.get("simulator_shape")),
+            ("lanes", case_cfg.get("vector_lanes")),
+            ("ub", case_cfg.get("ub_size_bytes", 12288)),
+            ("dma", case_cfg.get("dma_bytes", 4096)),
+            ("target", case_cfg.get("target", "dav-351x")),
+            ("core", case_cfg.get("core", "vec")),
+            ("fusion", case_cfg.get("fusion_mode", "no_fuse")),
+        ]
     return "|".join(f"{name}={value}" for name, value in fields if value not in (None, ""))
 
 
@@ -2050,6 +2087,117 @@ def check_behavior_consistency(results: list[dict[str, Any]], run_simulator: boo
             f"simulator result(s): [{simulator_states}]"
         )
     return gaps
+
+
+def result_is_asc_preflight(item: dict[str, Any]) -> bool:
+    return item.get("kind") in ("asc-ir", "lowered-opentile", "external-asc-static")
+
+
+def simulator_failure_replay_cases(suite: dict[str, Any]) -> dict[str, set[str]]:
+    by_key: dict[str, set[str]] = {}
+    for section in ("lowered_cases", "external_cases", "simulator_cases"):
+        for case in suite.get(section, []):
+            expected = case.get("expect_simulator_status")
+            if expected not in SIMULATOR_REJECT_STATUSES:
+                continue
+            by_key.setdefault(oracle_key(case), set()).add(case["name"])
+    return by_key
+
+
+def filter_simulator_failure_replay_cases(suite: dict[str, Any]) -> dict[str, Any]:
+    filtered = copy.deepcopy(suite)
+    replay_keys = set(simulator_failure_replay_cases(filtered))
+    for section in ("asc_cases", "lowered_cases", "external_cases", "simulator_cases"):
+        next_cases = []
+        for case in filtered.get(section, []):
+            if oracle_key(case) in replay_keys:
+                next_cases.append(case)
+        filtered[section] = next_cases
+    return filtered
+
+
+def classify_simulator_failure_replay(
+    results: list[dict[str, Any]],
+    suite: dict[str, Any],
+) -> list[dict[str, Any]]:
+    expected_failures = simulator_failure_replay_cases(suite)
+    actual_failures: dict[str, set[str]] = {}
+    by_key: dict[str, dict[str, list[dict[str, Any]]]] = {}
+
+    for item in results:
+        key = item.get("oracle_key")
+        if not key:
+            continue
+        bucket = by_key.setdefault(str(key), {"asc": [], "simulator": []})
+        if item.get("kind") == "simulator-oracle":
+            bucket["simulator"].append(item)
+            if item.get("status") in SIMULATOR_REJECT_STATUSES:
+                actual_failures.setdefault(str(key), set()).add(item["name"])
+        elif result_is_asc_preflight(item):
+            bucket["asc"].append(item)
+
+    replay_keys = sorted(set(expected_failures) | set(actual_failures))
+    replay: list[dict[str, Any]] = []
+    for key in replay_keys:
+        asc_results = by_key.get(key, {}).get("asc", [])
+        simulator_results = by_key.get(key, {}).get("simulator", [])
+        asc_accepts = [item for item in asc_results if item.get("status") == "pass"]
+        asc_rejects = [item for item in asc_results if item.get("status") in ASC_REJECT_STATUSES]
+        if asc_accepts:
+            classification = "asc_false_accept"
+        elif asc_rejects:
+            classification = "asc_preflight_caught"
+        else:
+            classification = "missing_asc_preflight"
+        replay.append(
+            {
+                "oracle_key": key,
+                "classification": classification,
+                "expected_failure_cases": sorted(expected_failures.get(key, set())),
+                "actual_failure_cases": sorted(actual_failures.get(key, set())),
+                "asc": [
+                    {"name": item["name"], "status": item["status"], "kind": item["kind"]}
+                    for item in asc_results
+                ],
+                "simulator": [
+                    {"name": item["name"], "status": item["status"], "kind": item["kind"]}
+                    for item in simulator_results
+                ],
+            }
+        )
+    return replay
+
+
+def check_simulator_failure_replay(replay: list[dict[str, Any]]) -> list[str]:
+    gaps: list[str] = []
+    for item in replay:
+        if item["classification"] == "asc_preflight_caught":
+            continue
+        asc_states = ", ".join(
+            f"{result['name']}:{result['status']}" for result in item.get("asc", [])
+        ) or "none"
+        simulator_cases = ", ".join(
+            item.get("actual_failure_cases") or item.get("expected_failure_cases") or ["unknown"]
+        )
+        gaps.append(
+            f"{item['oracle_key']}: simulator failure case(s) [{simulator_cases}] "
+            f"were not rejected by ASC preflight; ASC result(s): [{asc_states}]"
+        )
+    return gaps
+
+
+def print_simulator_failure_replay(replay: list[dict[str, Any]]) -> None:
+    if not replay:
+        return
+    counts: dict[str, int] = {}
+    for item in replay:
+        counts[item["classification"]] = counts.get(item["classification"], 0) + 1
+    summary = ", ".join(f"{name}={counts[name]}" for name in sorted(counts))
+    print(f"[simulator-failure-replay] {summary}")
+    for item in replay:
+        if item["classification"] == "asc_preflight_caught":
+            continue
+        print(f"  {item['classification']}: {item['oracle_key']}")
 
 
 def discover_a5_mlir_cases(opentileas_repo: Path) -> dict[str, Path]:
@@ -2131,6 +2279,14 @@ def main(argv: list[str]) -> int:
         help="only run suite cases whose name matches this regular expression",
     )
     parser.add_argument(
+        "--replay-simulator-failures",
+        action="store_true",
+        help=(
+            "only run suite cases whose configured simulator oracle is a failure; "
+            "use this to replay OpenTileAS simulator failures through ASC preflight"
+        ),
+    )
+    parser.add_argument(
         "--enforce-simulator-coverage",
         action="store_true",
         help="fail if an ASC-pass lowered case lacks a matching simulator oracle case",
@@ -2145,11 +2301,18 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="fail if an actual ASC-pass result has a matching simulator result that is not pass",
     )
+    parser.add_argument(
+        "--enforce-simulator-failure-replay",
+        action="store_true",
+        help="fail if a configured or actual simulator-failing case is not rejected by ASC preflight",
+    )
     args = parser.parse_args(argv)
 
     suite_path = args.suite.resolve()
     full_suite = load_json(suite_path)
     suite = full_suite
+    if args.replay_simulator_failures:
+        suite = filter_simulator_failure_replay_cases(suite)
     if args.case_filter:
         suite = filter_suite_cases(suite, args.case_filter)
     suite_dir = suite_path.parent
@@ -2213,8 +2376,12 @@ def main(argv: list[str]) -> int:
                 )
 
     print_report(results)
+    simulator_failure_replay = classify_simulator_failure_replay(results, suite)
+    if args.replay_simulator_failures or args.enforce_simulator_failure_replay:
+        print_simulator_failure_replay(simulator_failure_replay)
     coverage_gaps = check_simulator_coverage(suite, args.run_simulator)
     behavior_gaps = check_behavior_consistency(results, args.run_simulator)
+    failure_replay_gaps = check_simulator_failure_replay(simulator_failure_replay)
     a5_coverage_gaps = check_a5_external_coverage(full_suite, args.opentileas_repo.resolve())
     if args.enforce_simulator_coverage and coverage_gaps:
         print("[simulator-coverage]")
@@ -2223,6 +2390,10 @@ def main(argv: list[str]) -> int:
     if args.enforce_behavior_consistency and behavior_gaps:
         print("[behavior-consistency]")
         for gap in behavior_gaps:
+            print(f"  {gap}")
+    if args.enforce_simulator_failure_replay and failure_replay_gaps:
+        print("[simulator-failure-replay-gaps]")
+        for gap in failure_replay_gaps:
             print(f"  {gap}")
     if args.enforce_a5_external_coverage and a5_coverage_gaps:
         print("[a5-external-coverage]")
@@ -2235,6 +2406,8 @@ def main(argv: list[str]) -> int:
                 "results": results,
                 "coverage_gaps": coverage_gaps,
                 "behavior_consistency_gaps": behavior_gaps,
+                "simulator_failure_replay": simulator_failure_replay,
+                "simulator_failure_replay_gaps": failure_replay_gaps,
                 "a5_external_coverage_gaps": a5_coverage_gaps,
             },
         )
@@ -2243,6 +2416,7 @@ def main(argv: list[str]) -> int:
         if all(item["ok"] for item in results)
         and not (args.enforce_simulator_coverage and coverage_gaps)
         and not (args.enforce_behavior_consistency and behavior_gaps)
+        and not (args.enforce_simulator_failure_replay and failure_replay_gaps)
         and not (args.enforce_a5_external_coverage and a5_coverage_gaps)
         else 1
     )

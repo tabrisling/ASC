@@ -93,6 +93,20 @@ build/bin/asc-intrinsic-coverage --fail-on-p0-missing-oracle
 build/bin/asc-intrinsic-coverage --fail-on-supported-missing-oracle
 ```
 
+Simulator failure replay:
+
+```bash
+build/bin/asc-sim-oracle \
+  --replay-simulator-failures \
+  --enforce-simulator-failure-replay
+```
+
+Use this whenever an OpenTileAS simulator conversation or run produces a
+failing `simulator/cases/*` kernel. Add the case to the oracle suite with its
+observed `expect_simulator_status`, then require ASC to reject it locally. The
+remote rerun can be refreshed with `--run-simulator --ssh opentile-simu`, but
+the local replay gate should stay fast enough to run frequently.
+
 ### B. Memory, Descriptor, and Synchronization Model
 
 Owner focus: DAV-3510 execution skeleton and rejection accuracy.
@@ -275,4 +289,3 @@ The next parallel batch should be:
 4. RMSNorm prerequisites: f16 load-store plus f16/f32 conversion plan.
 5. Cube/GEMM: static fail-closed inventory for L1/L0/MAD/FIX.
 6. CV/gather: promote memory block/gather cases only after byte memory lands.
-
