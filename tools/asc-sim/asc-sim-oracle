@@ -820,10 +820,11 @@ def run_external_asc_static_case(
             for name in case_cfg.get("intrinsics", [])
         }
         missing_configured = sorted(configured - found)
+        unconfigured_found = sorted(found - configured)
         unsupported = sorted(found - ASC_MODEL_SUPPORTED_INTRINSICS)
         if lower_result.returncode != 0:
             status = "lower_error"
-        elif missing_configured:
+        elif missing_configured or unconfigured_found:
             status = "coverage_config_error"
         elif unsupported:
             status = "static_unsupported"
@@ -836,6 +837,8 @@ def run_external_asc_static_case(
                 details.append(f"... {len(unsupported) - 12} more unsupported intrinsics")
         if missing_configured:
             details.append("configured intrinsics missing from lowered IR: " + ", ".join(missing_configured))
+        if unconfigured_found:
+            details.append("lowered IR intrinsics missing from suite config: " + ", ".join(unconfigured_found))
         if lower_result.returncode != 0:
             details.append(tail(lower_result.stderr))
         return {

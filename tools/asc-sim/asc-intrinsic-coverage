@@ -172,11 +172,11 @@ def categorize(name: str) -> str:
         return "cube-matmul"
     if any(token in lowered for token in ("mov.", "get.buf", "rls.buf")):
         return "dma"
-    if any(token in lowered for token in ("flag", "barrier", "mem.bar", "sbitset", "ctrl")):
+    if any(token in lowered for token in ("flag", "barrier", "mem.bar", "sbitset", "ctrl", "intra.block")):
         return "sync"
-    if any(token in lowered for token in ("pld", "plt.", "pst", "pset")):
+    if any(token in lowered for token in ("pld", "plt.", "pst", "pset", "sprclr", "init.vector.align")):
         return "predicate-state"
-    if any(token in lowered for token in ("vlds", "vldu", "vsts", "vstus", "vstas", "vsldb")):
+    if any(token in lowered for token in ("vlds", "vldu", "vsts", "vstus", "vstur", "vstar", "vstas", "vsldb")):
         return "load-store"
     if any(token in lowered for token in ("vcvt", "vtrc", "vmulscvt")):
         return "convert"
