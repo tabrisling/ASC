@@ -79,6 +79,10 @@ TERNARY_VECTOR_OPS = {
     ),
 }
 
+CONVERT_VECTOR_OPS = {
+    "@llvm.hivm.vmulscvt.v128f16": "vmulscvt",
+}
+
 SELECT_VECTOR_OPS = {
     "@llvm.hivm.vsel.v64f32": "vsel",
 }
@@ -237,20 +241,23 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
                 raise SimError(f"buffer {name}: values longer than declared size")
             values = values + [0.0] * (size - len(values))
         buffers[name] = Buffer(name=name, values=values, dtype=dtype, space=space)
-    if "__ub" not in buffers:
+    if "__ub" not in buffers and "__ub_f32" not in buffers and "__ub_f16" not in buffers:
         ub_size_bytes = int(case.get("ub_size_bytes", DEFAULT_UB_BYTES))
         ub_dtype = case.get("ub_dtype", "f32")
-        if ub_dtype not in ("f32", "f16"):
-            raise SimError(f"ub_dtype: only f32/f16 are supported now, got {ub_dtype}")
-        element_bytes = dtype_bytes(ub_dtype)
-        if ub_size_bytes % element_bytes != 0:
-            raise SimError(f"ub_size_bytes must be divisible by {element_bytes} for {ub_dtype}")
-        buffers["__ub"] = Buffer(
-            name="__ub",
-            values=[0.0] * (ub_size_bytes // element_bytes),
-            dtype=ub_dtype,
-            space="ub",
-        )
+        ub_dtypes = ("f32", "f16") if ub_dtype == "mixed" else (ub_dtype,)
+        for dtype in ub_dtypes:
+            if dtype not in ("f32", "f16"):
+                raise SimError(f"ub_dtype: only f32/f16/mixed are supported now, got {ub_dtype}")
+            element_bytes = dtype_bytes(dtype)
+            if ub_size_bytes % element_bytes != 0:
+                raise SimError(f"ub_size_bytes must be divisible by {element_bytes} for {dtype}")
+            name = "__ub" if len(ub_dtypes) == 1 else f"__ub_{dtype}"
+            buffers[name] = Buffer(
+                name=name,
+                values=[0.0] * (ub_size_bytes // element_bytes),
+                dtype=dtype,
+                space="ub",
+            )
     return buffers
 
 
@@ -382,7 +389,12 @@ class DavVAddSim:
             return str(max(numeric_args) + 1)
         return "entry"
 
-    def _resolve_pointer(self, ptr: TypedValue, expected_space: str) -> tuple[Buffer, int]:
+    def _resolve_pointer(
+        self,
+        ptr: TypedValue,
+        expected_space: str,
+        preferred_dtype: str | None = None,
+    ) -> tuple[Buffer, int]:
         expected_addrspace = GM_ADDRSPACE if expected_space == "gm" else UB_ADDRSPACE
         if ptr.addrspace is not None and ptr.addrspace != expected_addrspace:
             raise SimError(
@@ -392,7 +404,7 @@ class DavVAddSim:
         if isinstance(ptr.value, int):
             if expected_space != "ub":
                 raise SimError("integer pointer constants are only supported for UB")
-            return self.buffers["__ub"], ptr.value
+            return self._default_ub_buffer(preferred_dtype), ptr.value
         bound = self.values.get(ptr.value)
         if isinstance(bound, PointerValue):
             if bound.addrspace != expected_addrspace:
@@ -411,6 +423,19 @@ class DavVAddSim:
         if buf.space != expected_space:
             raise SimError(f"buffer {buf.name} is in {buf.space}; expected {expected_space}")
         return buf, byte_offset
+
+    def _default_ub_buffer(self, preferred_dtype: str | None) -> Buffer:
+        if preferred_dtype:
+            typed_name = f"__ub_{preferred_dtype}"
+            if typed_name in self.buffers:
+                return self.buffers[typed_name]
+        if "__ub" in self.buffers:
+            return self.buffers["__ub"]
+        if preferred_dtype:
+            raise SimError(f"UB has no {preferred_dtype} view")
+        if "__ub_f32" in self.buffers:
+            return self.buffers["__ub_f32"]
+        raise SimError("UB buffer is missing")
 
     def _check_region(self, buf: Buffer, byte_offset: int, byte_count: int, op: str) -> int:
         if byte_offset < 0:
@@ -563,12 +588,12 @@ class DavVAddSim:
         name = call.group(2)
         args = [parse_typed_value(a) for a in split_args(call.group(3))]
 
-        if name == "@llvm.hivm.pset.b32":
+        if name in ("@llvm.hivm.pset.b32", "@llvm.hivm.pset.b16"):
             if lhs is None:
                 raise SimError("pset result is unused")
             pattern = self._as_int(args[0], "pset pattern")
             self.values[lhs] = pattern_to_mask(pattern)
-            self.trace.append(f"{lhs} = pset({pattern})")
+            self.trace.append(f"{lhs} = {name.rsplit('.', 1)[-1]}({pattern})")
             return
 
         if name == "@llvm.hivm.GET.CTRL":
@@ -630,9 +655,9 @@ class DavVAddSim:
         ):
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
-            dst, dst_base = self._resolve_pointer(args[0], "ub")
             src, src_base = self._resolve_pointer(args[1], "gm")
             expected_dtype = "f16" if ".f16." in name else "f32"
+            dst, dst_base = self._resolve_pointer(args[0], "ub", preferred_dtype=expected_dtype)
             if src.dtype != expected_dtype or dst.dtype != expected_dtype:
                 raise SimError(
                     f"{name}: expected {expected_dtype} buffers, got {src.dtype}->{dst.dtype}"
@@ -648,7 +673,7 @@ class DavVAddSim:
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
             dst, dst_base = self._resolve_pointer(args[0], "gm")
-            src, src_base = self._resolve_pointer(args[1], "ub")
+            src, src_base = self._resolve_pointer(args[1], "ub", preferred_dtype=dst.dtype)
             byte_count = self._dma_out_byte_count(args[2])
             self._copy_typed(src, src_base, dst, dst_base, byte_count, "MOV.UB.TO.OUT")
             self.trace.append(
@@ -662,7 +687,9 @@ class DavVAddSim:
                 raise SimError("vldsx1 result is unused")
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
-            buf, base_byte = self._resolve_pointer(args[0], "ub")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="f32")
+            if buf.dtype != "f32":
+                raise SimError(f"{name}: expected f32 UB buffer, got {buf.dtype}")
             byte_offset = self._as_int(args[1], "vldsx1 byte offset")
             norm = self._as_int(args[2], "vldsx1 norm")
             postupdate = self._as_int(args[3], "vldsx1 postupdate")
@@ -678,7 +705,7 @@ class DavVAddSim:
                 raise SimError("vldsx1 result is unused")
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
-            buf, base_byte = self._resolve_pointer(args[0], "ub")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="f16")
             if buf.dtype != "f16":
                 raise SimError(f"{name}: expected f16 UB buffer, got {buf.dtype}")
             byte_offset = self._as_int(args[1], "vldsx1 byte offset")
@@ -800,6 +827,22 @@ class DavVAddSim:
             )
             return
 
+        if name in CONVERT_VECTOR_OPS:
+            if lhs is None:
+                raise SimError(f"{CONVERT_VECTOR_OPS[name]} result is unused")
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            op_label = CONVERT_VECTOR_OPS[name]
+            src = self._as_vector(args[0], f"{op_label} input")
+            scalar = self._as_float(args[1], f"{op_label} scalar")
+            mask = self._as_mask(args[2], f"{op_label} mask")
+            part = self._as_int(args[3], f"{op_label} part")
+            self.values[lhs] = self._vmulscvt_f16(src, scalar, mask, part)
+            self.trace.append(
+                f"{lhs} = {op_label}({args[0].value}, {scalar}, {args[2].value}, {part})"
+            )
+            return
+
         if name in REDUCTION_VECTOR_OPS:
             if lhs is None:
                 raise SimError(f"{REDUCTION_VECTOR_OPS[name]} result is unused")
@@ -843,7 +886,7 @@ class DavVAddSim:
             if len(args) != 6:
                 raise SimError(f"{name}: expected 6 args, got {len(args)}")
             vec = self._as_vector(args[0], "vstsx1 value", allow_inactive=True)
-            buf, base_byte = self._resolve_pointer(args[1], "ub")
+            buf, base_byte = self._resolve_pointer(args[1], "ub", preferred_dtype="f32")
             byte_offset = self._as_int(args[2], "vstsx1 byte offset")
             norm = self._as_int(args[3], "vstsx1 norm")
             postupdate = self._as_int(args[4], "vstsx1 postupdate")
@@ -865,7 +908,7 @@ class DavVAddSim:
             if len(args) != 6:
                 raise SimError(f"{name}: expected 6 args, got {len(args)}")
             vec = self._as_vector(args[0], "vstsx1 f16 value", allow_inactive=True, lanes=LANES_F16_V128)
-            buf, base_byte = self._resolve_pointer(args[1], "ub")
+            buf, base_byte = self._resolve_pointer(args[1], "ub", preferred_dtype="f16")
             if buf.dtype != "f16":
                 raise SimError(f"{name}: expected f16 UB buffer, got {buf.dtype}")
             byte_offset = self._as_int(args[2], "vstsx1 byte offset")
@@ -973,6 +1016,24 @@ class DavVAddSim:
                 result.append(op(float(dst[idx]), float(src[idx]), scalar))
             else:
                 result.append(self._inactive_lane(mode, dst[idx]))
+        return result
+
+    def _vmulscvt_f16(
+        self,
+        src: list[float | None],
+        scalar: float,
+        mask: list[bool],
+        part: int,
+    ) -> list[float | None]:
+        if part not in (0, 1):
+            raise SimError("vmulscvt milestone supports part=0/1 only")
+        result: list[float | None] = [0.0] * LANES_F16_V128
+        for idx, active in enumerate(mask):
+            dst_lane = idx * 2 + part
+            if dst_lane >= LANES_F16_V128:
+                break
+            if active:
+                result[dst_lane] = f16(f32(float(src[idx]) * scalar))
         return result
 
     def _map_select_vector(

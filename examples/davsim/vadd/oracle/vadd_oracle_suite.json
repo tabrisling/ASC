@@ -180,6 +180,27 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "gm_ub_register_a5_vmulscvt_f16_64",
+      "ir": "../vmulscvt_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.pset.b16",
+        "@llvm.hivm.pset.b32",
+        "@llvm.hivm.vldsx1.v64f32",
+        "@llvm.hivm.vmulscvt.v128f16",
+        "@llvm.hivm.vstsx1.v128f16"
+      ],
+      "generated": "a5_vmulscvt_f16_64",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "direct_ir_vcadd_f16_unsupported",
       "ir": "unsupported/vcadd_f16.ll",
       "case": "../vadd.case.json",
@@ -2004,7 +2025,8 @@
       "core": "vec",
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "static_unsupported",
+      "expect_asc_status": "pass",
+      "require_simulator": false,
       "expect_simulator_status": "pass",
       "intrinsics": [
         "@llvm.hivm.BARRIER",
