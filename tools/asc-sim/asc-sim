@@ -1376,6 +1376,52 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = vgatherb.b64(UB, byte_offset={base_byte})")
             return
 
+        if name in ("@llvm.hivm.VBS32.V300.f16", "@llvm.hivm.VBS32.V300.f32"):
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            config = self._as_int(args[3], "VBS32 config")
+            if config != 0x0100000000000000:
+                raise SimError("VBS32 milestone supports config=0x0100000000000000 only")
+            dst, dst_base = self._resolve_pointer(args[0], "ub", preferred_dtype="u8")
+            if dst.dtype not in ("u8", "s8"):
+                raise SimError(f"{name}: expected byte-addressable output UB, got {dst.dtype}")
+            index_buf, index_base = self._resolve_pointer(args[2], "ub", preferred_dtype="u32")
+            if index_buf.dtype not in ("u32", "s32"):
+                raise SimError(f"{name}: expected 32-bit index UB, got {index_buf.dtype}")
+            index_start = self._check_region(index_buf, index_base, 32 * I32_BYTES, "VBS32 indices")
+            indices = [u32(x) for x in index_buf.values[index_start : index_start + 32]]
+            if name == "@llvm.hivm.VBS32.V300.f32":
+                score_buf, score_base = self._resolve_pointer(args[1], "ub", preferred_dtype="f32")
+                if score_buf.dtype != "f32":
+                    raise SimError(f"{name}: expected f32 score UB, got {score_buf.dtype}")
+                score_start = self._check_region(score_buf, score_base, 32 * F32_BYTES, "VBS32 f32 scores")
+                scores = list(score_buf.values[score_start : score_start + 32])
+                order = sorted(range(32), key=lambda idx: (-float(f32_bits_to_float(scores[idx])), idx))
+                output = [
+                    byte
+                    for idx in order
+                    for byte in (f32_to_le_bytes(scores[idx]) + u32_to_le_bytes(indices[idx]))
+                ]
+            else:
+                score_buf, score_base = self._resolve_pointer(args[1], "ub", preferred_dtype="f16")
+                if score_buf.dtype != "f16":
+                    raise SimError(f"{name}: expected f16 score UB, got {score_buf.dtype}")
+                score_start = self._check_region(score_buf, score_base, 32 * F16_BYTES, "VBS32 f16 scores")
+                scores = list(score_buf.values[score_start : score_start + 32])
+                order = sorted(range(32), key=lambda idx: (-float(f16_bits_to_float(scores[idx])), idx))
+                output = [
+                    byte
+                    for idx in order
+                    for byte in (
+                        f16_to_le_bytes(scores[idx])
+                        + [0, 0]
+                        + u32_to_le_bytes(indices[idx])
+                    )
+                ]
+            self._write_ub_bytes(dst_base, output, "VBS32")
+            self.trace.append(f"VBS32({name.rsplit('.', 1)[-1]}, entries=32)")
+            return
+
         if name in (
             "@llvm.hivm.vgather2.v300.v256s8",
             "@llvm.hivm.vgather2.v300.v256u8",

@@ -20,6 +20,8 @@ MODEL_SUPPORTED = {
     "@llvm.hivm.SET.FLAG.IMM",
     "@llvm.hivm.WAIT.FLAG.IMM",
     "@llvm.hivm.BARRIER",
+    "@llvm.hivm.VBS32.V300.f16",
+    "@llvm.hivm.VBS32.V300.f32",
     "@llvm.hivm.sprclr",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV",

@@ -132,6 +132,8 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.SET.FLAG.IMM",
     "@llvm.hivm.WAIT.FLAG.IMM",
     "@llvm.hivm.BARRIER",
+    "@llvm.hivm.VBS32.V300.f16",
+    "@llvm.hivm.VBS32.V300.f32",
     "@llvm.hivm.sprclr",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV",
@@ -1315,6 +1317,143 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
                 "ub_size_bytes": 2048,
                 "dma_bytes": 512,
                 "checks": [{"buffer": "out", "golden": gathered * 2, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
+    if generated in ("a5_vbitsort_f32_64", "a5_vbitsort_f16_128"):
+        raw_scores = [
+            0.5,
+            -2.0,
+            7.0,
+            7.0,
+            -0.0,
+            3.25,
+            1024.0,
+            -512.0,
+            1.0,
+            1.0,
+            -1.0,
+            64.0,
+            -64.0,
+            0.25,
+            0.25,
+            999.0,
+            -999.0,
+            4.5,
+            4.5,
+            2.0,
+            -3.0,
+            8.0,
+            8.0,
+            6.0,
+            -6.0,
+            0.0,
+            15.5,
+            -15.5,
+            31.0,
+            31.0,
+            -31.0,
+            128.0,
+        ]
+        indices = [
+            100,
+            0x10002,
+            77,
+            88,
+            55,
+            203,
+            999,
+            1,
+            17,
+            18,
+            19,
+            64,
+            65,
+            12,
+            13,
+            1000,
+            1001,
+            42,
+            43,
+            44,
+            45,
+            80,
+            81,
+            82,
+            83,
+            56,
+            200,
+            201,
+            300,
+            301,
+            302,
+            400,
+        ]
+
+        def f16_bits(value: float) -> int:
+            return struct.unpack("<H", struct.pack("<e", f16(value)))[0]
+
+        def f32_bits(value: float) -> int:
+            return struct.unpack("<I", struct.pack("<f", f32(value)))[0]
+
+        if generated == "a5_vbitsort_f32_64":
+            scores = [f32(value) for value in raw_scores]
+            order = sorted(range(32), key=lambda idx: (-float(scores[idx]), idx))
+            golden = [
+                word
+                for idx in order
+                for word in (f32_bits(scores[idx]), indices[idx] & 0xFFFFFFFF)
+            ]
+            case_json.clear()
+            case_json.update(
+                {
+                    "entry": "dav_vbitsort_f32",
+                    "arguments": {
+                        "%scores": "scores",
+                        "%indices": "indices",
+                        "%out": "out",
+                    },
+                    "buffers": {
+                        "scores": {"space": "gm", "dtype": "f32", "values": scores + [0.0] * 32},
+                        "indices": {"space": "gm", "dtype": "u32", "values": indices + [0] * 32},
+                        "out": {"space": "gm", "dtype": "u32", "size": 64},
+                    },
+                    "ub_dtypes": ["u8", "f32", "u32"],
+                    "ub_size_bytes": 1024,
+                    "dma_bytes": 256,
+                    "checks": [{"buffer": "out", "golden": golden, "atol": 0, "rtol": 0}],
+                }
+            )
+            return
+
+        scores = [f16(value) for value in raw_scores]
+        order = sorted(range(32), key=lambda idx: (-float(scores[idx]), idx))
+        golden16 = [0] * 128
+        for out_idx, src_idx in enumerate(order):
+            base = out_idx * 4
+            index = indices[src_idx] & 0xFFFFFFFF
+            golden16[base] = f16_bits(scores[src_idx])
+            golden16[base + 1] = 0
+            golden16[base + 2] = index & 0xFFFF
+            golden16[base + 3] = (index >> 16) & 0xFFFF
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_vbitsort_f16",
+                "arguments": {
+                    "%scores": "scores",
+                    "%indices": "indices",
+                    "%out": "out",
+                },
+                "buffers": {
+                    "scores": {"space": "gm", "dtype": "f16", "values": scores + [0.0] * 96},
+                    "indices": {"space": "gm", "dtype": "u32", "values": indices + [0] * 32},
+                    "out": {"space": "gm", "dtype": "u16", "size": 128},
+                },
+                "ub_dtypes": ["u8", "f16", "u16", "u32"],
+                "ub_size_bytes": 1024,
+                "dma_bytes": 256,
+                "checks": [{"buffer": "out", "golden": golden16, "atol": 0, "rtol": 0}],
             }
         )
         return
