@@ -137,6 +137,9 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vsqrt.x.v64f32",
     "@llvm.hivm.vexp.x.v64f32",
     "@llvm.hivm.vln.x.v64f32",
+    "@llvm.hivm.vlrelu.x.v64f32",
+    "@llvm.hivm.vmadd.m.v64f32",
+    "@llvm.hivm.vaxpy.m.v64f32",
     "@llvm.hivm.vadds.s.x.v64f32",
     "@llvm.hivm.vmuls.s.x.v64f32",
     "@llvm.hivm.vmaxs.s.x.v64f32",
@@ -777,6 +780,35 @@ def patch_mask_patterns(ir_text: str, case_cfg: dict[str, Any]) -> str:
 
 
 def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
+    if generated == "a5_fused_f32_64":
+        lane = range(64)
+        x = [f32(((i % 17) - 8) * 0.5) for i in lane]
+        for idx, value in ((0, -0.0), (1, 0.0), (31, -7.5), (32, 3.25), (63, -1.0)):
+            x[idx] = f32(value)
+        acc = [f32(((i * 3) % 19) - 9) for i in lane]
+        mul = [f32(((i % 11) - 5) * 0.25) for i in lane]
+        golden = []
+        for xv, accv, mulv in zip(x, acc, mul):
+            relu = f32(xv if xv >= 0.0 else f32(xv * 0.125))
+            madd = f32(f32(accv * relu) + mulv)
+            golden.append(f32(madd + f32(xv * -0.5)))
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_fused_f32",
+                "arguments": {"%x": "x", "%acc": "acc", "%mul": "mul", "%out": "out"},
+                "buffers": {
+                    "x": {"space": "gm", "dtype": "f32", "values": x},
+                    "acc": {"space": "gm", "dtype": "f32", "values": acc},
+                    "mul": {"space": "gm", "dtype": "f32", "values": mul},
+                    "out": {"space": "gm", "dtype": "f32", "size": 64},
+                },
+                "ub_size_bytes": 1024,
+                "dma_bytes": 256,
+                "checks": [{"buffer": "out", "golden": golden, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
     if generated == "f16_vadd_128":
         a = [f16((idx - 64) / 4.0) for idx in range(128)]
         b = [f16((idx % 17) / 8.0 - 1.0) for idx in range(128)]

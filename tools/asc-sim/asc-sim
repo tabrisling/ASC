@@ -56,6 +56,27 @@ SCALAR_VECTOR_OPS = {
     "@llvm.hivm.vmuls.s.x.v64f32": ("vmuls", "x", lambda a, s: f32(a * s)),
     "@llvm.hivm.vmaxs.s.x.v64f32": ("vmaxs", "x", lambda a, s: f32(max(a, s))),
     "@llvm.hivm.vmins.s.x.v64f32": ("vmins", "x", lambda a, s: f32(min(a, s))),
+    "@llvm.hivm.vlrelu.x.v64f32": (
+        "vlrelu",
+        "x",
+        lambda a, s: f32(a if a >= 0.0 else f32(a * s)),
+    ),
+}
+
+VECTOR_VECTOR_SCALAR_OPS = {
+    "@llvm.hivm.vaxpy.m.v64f32": (
+        "vaxpy",
+        "m",
+        lambda dst, src, alpha: f32(dst + f32(src * alpha)),
+    ),
+}
+
+TERNARY_VECTOR_OPS = {
+    "@llvm.hivm.vmadd.m.v64f32": (
+        "vmadd",
+        "m",
+        lambda dst, a, b: f32(f32(dst * a) + b),
+    ),
 }
 
 SELECT_VECTOR_OPS = {
@@ -712,6 +733,40 @@ class DavVAddSim:
             )
             return
 
+        if name in VECTOR_VECTOR_SCALAR_OPS:
+            if lhs is None:
+                raise SimError(f"{VECTOR_VECTOR_SCALAR_OPS[name][0]} result is unused")
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            op_label, mode, op = VECTOR_VECTOR_SCALAR_OPS[name]
+            dst = self._as_vector(args[0], f"{op_label} dst")
+            src = self._as_vector(args[1], f"{op_label} src")
+            scalar = self._as_float(args[2], f"{op_label} scalar")
+            mask = self._as_mask(args[3], f"{op_label} mask")
+            self.values[lhs] = self._map_vector_vector_scalar(dst, src, scalar, mask, mode, op)
+            self.trace.append(
+                f"{lhs} = {op_label}.{mode}("
+                f"{args[0].value}, {args[1].value}, {scalar}, {args[3].value})"
+            )
+            return
+
+        if name in TERNARY_VECTOR_OPS:
+            if lhs is None:
+                raise SimError(f"{TERNARY_VECTOR_OPS[name][0]} result is unused")
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            op_label, mode, op = TERNARY_VECTOR_OPS[name]
+            dst = self._as_vector(args[0], f"{op_label} dst")
+            a = self._as_vector(args[1], f"{op_label} lhs")
+            b = self._as_vector(args[2], f"{op_label} rhs")
+            mask = self._as_mask(args[3], f"{op_label} mask")
+            self.values[lhs] = self._map_ternary_vector(dst, a, b, mask, mode, op)
+            self.trace.append(
+                f"{lhs} = {op_label}.{mode}("
+                f"{args[0].value}, {args[1].value}, {args[2].value}, {args[3].value})"
+            )
+            return
+
         if name in SELECT_VECTOR_OPS:
             if lhs is None:
                 raise SimError(f"{SELECT_VECTOR_OPS[name]} result is unused")
@@ -884,6 +939,40 @@ class DavVAddSim:
                 result.append(op(float(vec[idx]), scalar))
             else:
                 result.append(self._inactive_lane(mode, vec[idx]))
+        return result
+
+    def _map_ternary_vector(
+        self,
+        dst: list[float | None],
+        left: list[float | None],
+        right: list[float | None],
+        mask: list[bool],
+        mode: str,
+        op: Callable[[float, float, float], float],
+    ) -> list[float | None]:
+        result: list[float | None] = []
+        for idx, active in enumerate(mask):
+            if active:
+                result.append(op(float(dst[idx]), float(left[idx]), float(right[idx])))
+            else:
+                result.append(self._inactive_lane(mode, dst[idx]))
+        return result
+
+    def _map_vector_vector_scalar(
+        self,
+        dst: list[float | None],
+        src: list[float | None],
+        scalar: float,
+        mask: list[bool],
+        mode: str,
+        op: Callable[[float, float, float], float],
+    ) -> list[float | None]:
+        result: list[float | None] = []
+        for idx, active in enumerate(mask):
+            if active:
+                result.append(op(float(dst[idx]), float(src[idx]), scalar))
+            else:
+                result.append(self._inactive_lane(mode, dst[idx]))
         return result
 
     def _map_select_vector(
