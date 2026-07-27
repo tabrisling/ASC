@@ -102,6 +102,14 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "gm_ub_register_vexpdif_64_part0",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "op": "vexpdif",
+      "part": 0,
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "gm_ub_register_vadds_64",
       "ir": "../vadd.ll",
       "case": "../vadd.case.json",
@@ -426,6 +434,19 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "opentile_vector_expdif_lowered_n64_part0",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vexpdif",
+      "part": 0,
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "opentile_vector_adds_lowered_n64",
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "op": "vadds",
@@ -460,6 +481,33 @@
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
       "expect_asc_status": "pass"
+    },
+    {
+      "name": "opentile_vector_expdif_lowered_n64_part1",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vexpdif",
+      "part": 1,
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "opentile_vector_expdif_mask32_lowered_n64_part0",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vexpdif",
+      "part": 0,
+      "mask_pattern": 8,
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "error"
     },
     {
       "name": "opentile_vector_add_z_mask32_store64_lowered_n1024",
@@ -843,6 +891,20 @@
       "target": "dav-351x",
       "op": "vexp",
       "n_elements": 64,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_expdif_simulator_n64_part0",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vexpdif",
+      "part": 0,
+      "n_elements": 64,
+      "golden_atol": 1e-5,
+      "golden_rtol": 1e-5,
       "expect_simulator_status": "pass"
     },
     {

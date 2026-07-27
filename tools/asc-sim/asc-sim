@@ -57,6 +57,10 @@ SELECT_VECTOR_OPS = {
     "@llvm.hivm.vsel.v64f32": "vsel",
 }
 
+DIFF_EXP_VECTOR_OPS = {
+    "@llvm.hivm.vexpdif.v64f32": "vexpdif",
+}
+
 
 class SimError(RuntimeError):
     pass
@@ -624,6 +628,24 @@ class DavVAddSim:
             )
             return
 
+        if name in DIFF_EXP_VECTOR_OPS:
+            if lhs is None:
+                raise SimError(f"{DIFF_EXP_VECTOR_OPS[name]} result is unused")
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            op_label = DIFF_EXP_VECTOR_OPS[name]
+            left = self._as_vector(args[0], f"{op_label} lhs")
+            right = self._as_vector(args[1], f"{op_label} rhs")
+            mask = self._as_mask(args[2], f"{op_label} mask")
+            part = self._as_int(args[3], f"{op_label} part")
+            if part != 0:
+                raise SimError("vexpdif milestone supports part=0 only")
+            self.values[lhs] = self._map_diff_exp_vector(left, right, mask)
+            self.trace.append(
+                f"{lhs} = {op_label}({args[0].value}, {args[1].value}, {args[2].value}, {part})"
+            )
+            return
+
         if name == "@llvm.hivm.vdups.z.v64f32":
             if lhs is None:
                 raise SimError("vdups result is unused")
@@ -728,6 +750,21 @@ class DavVAddSim:
             if selected is None:
                 raise SimError(f"vsel reads inactive source lane {idx}")
             result.append(f32(float(selected)))
+        return result
+
+    def _map_diff_exp_vector(
+        self,
+        left: list[float | None],
+        right: list[float | None],
+        mask: list[bool],
+    ) -> list[float | None]:
+        if not all(mask):
+            raise SimError("vexpdif milestone supports full mask only")
+        result: list[float | None] = []
+        for idx in range(LANES_F32_V64):
+            if left[idx] is None or right[idx] is None:
+                raise SimError(f"vexpdif reads inactive source lane {idx}")
+            result.append(f32_exp(f32(float(left[idx]) - float(right[idx]))))
         return result
 
     def _execute_scalar_or_pointer_line(self, line: str) -> bool:
