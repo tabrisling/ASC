@@ -209,6 +209,8 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vgatherb.v310.v128u16",
     "@llvm.hivm.vgatherb.v310.v128f16",
     "@llvm.hivm.vgatherb.v310.v128bf16",
+    "@llvm.hivm.vgatherb.v310.v32s64",
+    "@llvm.hivm.vgatherb.v310.v32u64",
     "@llvm.hivm.vgatherb.v310.v64s32",
     "@llvm.hivm.vgatherb.v310.v64u32",
     "@llvm.hivm.vgatherb.v310.v64f32",
@@ -1288,6 +1290,31 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
                 "ub_size_bytes": 4096,
                 "dma_bytes": 512,
                 "checks": [{"buffer": "out", "golden": gathered * 3, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
+    if generated == "a5_vgatherb_b64_512":
+        data = [((idx * 67 + 19) & 0xFF) for idx in range(512)]
+        data[:4] = [0xFF] * 4
+        offsets = [0] * 64
+        offsets[:8] = [480, 0, 224, 32, 448, 64, 416, 128]
+        gathered: list[int] = []
+        for offset in offsets[:8]:
+            gathered.extend(data[offset : offset + 32])
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_vgatherb_b64",
+                "arguments": {"%data": "data", "%offsets": "offsets", "%out": "out"},
+                "buffers": {
+                    "data": {"space": "gm", "dtype": "u8", "values": data},
+                    "offsets": {"space": "gm", "dtype": "u32", "values": offsets},
+                    "out": {"space": "gm", "dtype": "u8", "size": 512},
+                },
+                "ub_dtypes": ["u8", "u32", "s32"],
+                "ub_size_bytes": 2048,
+                "dma_bytes": 512,
+                "checks": [{"buffer": "out", "golden": gathered * 2, "atol": 0, "rtol": 0}],
             }
         )
         return

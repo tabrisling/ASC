@@ -427,6 +427,28 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "gm_ub_register_a5_vgatherb_b64_512",
+      "ir": "../vgatherb_b64.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.pset.b32",
+        "@llvm.hivm.vgatherb.v310.v32s64",
+        "@llvm.hivm.vgatherb.v310.v32u64",
+        "@llvm.hivm.vldsx1.v64s32",
+        "@llvm.hivm.vstsx1.v64s32"
+      ],
+      "generated": "a5_vgatherb_b64_512",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "gm_ub_register_a5_vgather2_matrix_2304",
       "ir": "../vgather2_matrix.ll",
       "case": "../vadd.case.json",
@@ -2988,7 +3010,7 @@
       "core": "vec",
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "static_unsupported",
+      "expect_asc_status": "pass",
       "expect_simulator_status": "pass",
       "intrinsics": [
         "@llvm.hivm.BARRIER",
@@ -3002,7 +3024,8 @@
         "@llvm.hivm.vgatherb.v310.v32u64",
         "@llvm.hivm.vldsx1.v64s32",
         "@llvm.hivm.vstsx1.v64s32"
-      ]
+      ],
+      "require_simulator": false
     },
     {
       "name": "opentile_a5_vmadd_bf16",

@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 LANES_F32_V64 = 64
 LANES_I32_V64 = 64
+LANES_I64_V32 = 32
 LANES_I8_V256 = 256
 LANES_I16_V128 = 128
 LANES_F16_V128 = 128
@@ -29,12 +30,14 @@ LANES_BF16_V128 = 128
 LANES_F32_V128 = 128
 F32_BYTES = 4
 I32_BYTES = 4
+I64_BYTES = 8
 I16_BYTES = 2
 F16_BYTES = 2
 BF16_BYTES = 2
 I8_BYTES = 1
 VECTOR_BYTES_V64F32 = LANES_F32_V64 * F32_BYTES
 VECTOR_BYTES_V64I32 = LANES_I32_V64 * I32_BYTES
+VECTOR_BYTES_V32I64 = LANES_I64_V32 * I64_BYTES
 VECTOR_BYTES_V256I8 = LANES_I8_V256 * I8_BYTES
 VECTOR_BYTES_V128I16 = LANES_I16_V128 * I16_BYTES
 VECTOR_BYTES_V128F16 = LANES_F16_V128 * F16_BYTES
@@ -420,6 +423,15 @@ def round_dtype(value: Any, dtype: str) -> int | float:
 def u32_to_le_bytes(value: int | float) -> list[int]:
     raw = u32(value)
     return [(raw >> shift) & 0xFF for shift in (0, 8, 16, 24)]
+
+
+def u64(value: int | float) -> int:
+    return int(value) & 0xFFFFFFFFFFFFFFFF
+
+
+def u64_to_le_bytes(value: int | float) -> list[int]:
+    raw = u64(value)
+    return [(raw >> shift) & 0xFF for shift in (0, 8, 16, 24, 32, 40, 48, 56)]
 
 
 def f32_to_le_bytes(value: int | float) -> list[int]:
@@ -1326,6 +1338,42 @@ class DavVAddSim:
                 )
             self.values[lhs] = pack_u32_words_from_bytes(gathered_bytes)
             self.trace.append(f"{lhs} = vgatherb.i32/u32/f32(UB, byte_offset={base_byte})")
+            return
+
+        if name in ("@llvm.hivm.vgatherb.v310.v32s64", "@llvm.hivm.vgatherb.v310.v32u64"):
+            if lhs is None:
+                raise SimError("vgatherb b64 result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u8")
+            if buf.dtype not in ("u8", "s8"):
+                raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
+            offsets = self._as_u32_vector(args[1], "vgatherb b64 offsets")
+            mask = self._as_mask(args[2], "vgatherb b64 mask", lanes=LANES_I64_V32)
+            if not all(mask):
+                raise SimError("vgatherb b64 milestone supports full first-32-lane mask only")
+            gathered_bytes: list[int] = []
+            for block_idx in range(MEMORY_BLOCK_COUNT):
+                raw_offset = offsets[block_idx]
+                if raw_offset is None:
+                    raise SimError(f"vgatherb b64 reads inactive offset lane {block_idx}")
+                byte_offset = int(raw_offset)
+                if byte_offset < 0:
+                    raise SimError("vgatherb b64 milestone rejects negative offsets")
+                gathered_bytes.extend(
+                    self._read_ub_bytes(
+                        buf,
+                        base_byte + byte_offset,
+                        MEMORY_BLOCK_BYTES,
+                        "vgatherb b64",
+                    )
+                )
+            self.values[lhs] = [
+                u64(le_bytes_to_u32(gathered_bytes[idx : idx + I32_BYTES]))
+                | (u64(le_bytes_to_u32(gathered_bytes[idx + I32_BYTES : idx + I64_BYTES])) << 32)
+                for idx in range(0, len(gathered_bytes), I64_BYTES)
+            ]
+            self.trace.append(f"{lhs} = vgatherb.b64(UB, byte_offset={base_byte})")
             return
 
         if name in (
@@ -2538,6 +2586,25 @@ class DavVAddSim:
                 combined.append(left[index] if index < LANES_F32_V64 else right[index - LANES_F32_V64])
             self.values[lhs] = combined
             self.trace.append(f"{lhs} = shufflevector({shufflevector.group(2)}, {shufflevector.group(3)})")
+            return True
+
+        bitcast_i64_to_i32 = re.match(
+            r"(%[-A-Za-z0-9_.$]+)\s*=\s*bitcast\s+<32 x i64>\s+(%[-A-Za-z0-9_.$]+)\s+to\s+<64 x i32>$",
+            line,
+        )
+        if bitcast_i64_to_i32:
+            lhs = bitcast_i64_to_i32.group(1)
+            src_name = bitcast_i64_to_i32.group(2)
+            vec = self._as_vector(TypedValue(src_name), "bitcast i64 source", lanes=LANES_I64_V32)
+            result: list[int] = []
+            for idx, value in enumerate(vec):
+                if value is None:
+                    raise SimError(f"bitcast reads inactive/undefined i64 lane {idx}")
+                raw = u64(value)
+                result.append(raw & 0xFFFFFFFF)
+                result.append((raw >> 32) & 0xFFFFFFFF)
+            self.values[lhs] = result
+            self.trace.append(f"{lhs} = bitcast.i64x32.to.i32x64({src_name})")
             return True
 
         extractvalue = re.match(
