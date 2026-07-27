@@ -20,3 +20,13 @@ The model is intentionally functional. It checks the hardware constraints that
 matter for the first step, including GM/UB address space separation, 32-byte
 alignment, DMA region bounds, and buffer overflow, but it does not model cycle
 timing or pipeline scheduling.
+
+Run the oracle suite to exercise local negative cases and an OpenTileAS
+vector_add kernel after real dav-351x lowering:
+
+```bash
+build/bin/asc-sim-oracle
+```
+
+Add `--run-simulator --ssh opentile-simu` to also upload the canonical
+OpenTileAS vector_add case to the remote simulator oracle.

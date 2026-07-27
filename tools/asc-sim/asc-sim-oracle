@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Run dav vadd local-model checks and optional OpenTileAS simulator oracle checks."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json(path: Path, data: dict[str, Any]) -> None:
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def deep_merge(dst: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            deep_merge(dst[key], value)
+        else:
+            dst[key] = value
+    return dst
+
+
+def run_command(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=False)
+
+
+def classify_asc_status(returncode: int) -> str:
+    if returncode == 0:
+        return "pass"
+    if returncode == 1:
+        return "check_failed"
+    return "error"
+
+
+def apply_replacements(text: str, replacements: list[dict[str, str]]) -> str:
+    for item in replacements:
+        old = item["old"]
+        new = item.get("new", "")
+        if old not in text:
+            raise RuntimeError(f"replacement source not found: {old!r}")
+        text = text.replace(old, new, 1)
+    return text
+
+
+def run_asc_ir_case(
+    case_cfg: dict[str, Any],
+    suite_dir: Path,
+    asc_sim: Path,
+    tmp_dir: Path,
+) -> dict[str, Any]:
+    ir_path = (suite_dir / case_cfg["ir"]).resolve()
+    case_path = (suite_dir / case_cfg["case"]).resolve()
+    ir_text = apply_replacements(
+        ir_path.read_text(encoding="utf-8"),
+        case_cfg.get("replacements", []),
+    )
+    case_json = copy.deepcopy(load_json(case_path))
+    deep_merge(case_json, case_cfg.get("case_overrides", {}))
+
+    work_ir = tmp_dir / f"{case_cfg['name']}.ll"
+    work_case = tmp_dir / f"{case_cfg['name']}.case.json"
+    work_ir.write_text(ir_text, encoding="utf-8")
+    write_json(work_case, case_json)
+
+    result = run_command([str(asc_sim), str(work_ir), "--case", str(work_case)])
+    status = classify_asc_status(result.returncode)
+    expected = case_cfg.get("expect_asc_status", "pass")
+    return {
+        "name": case_cfg["name"],
+        "kind": "asc-ir",
+        "status": status,
+        "expected": expected,
+        "ok": status == expected,
+        "returncode": result.returncode,
+        "stderr_tail": tail(result.stderr),
+        "stdout_tail": tail(result.stdout),
+    }
+
+
+def generated_vadd_case(elements: int, ub_size_bytes: int, dma_bytes: int) -> dict[str, Any]:
+    x = [float(i) * 0.5 for i in range(elements)]
+    y = [7.0 - float(i) * 0.25 for i in range(elements)]
+    golden = [a + b for a, b in zip(x, y)]
+    return {
+        "entry": "add_kernel",
+        "arguments": {"%0": "x", "%1": "y", "%2": "output"},
+        "scalars": {"%3": elements},
+        "buffers": {
+            "x": {"space": "gm", "dtype": "f32", "values": x},
+            "y": {"space": "gm", "dtype": "f32", "values": y},
+            "output": {"space": "gm", "dtype": "f32", "size": elements},
+        },
+        "ub_size_bytes": ub_size_bytes,
+        "dma_bytes": dma_bytes,
+        "checks": [{"buffer": "output", "golden": golden, "atol": 0, "rtol": 0}],
+    }
+
+
+def lower_opentile_case(
+    opentileas_repo: Path,
+    build_dir: Path,
+    mlir: Path,
+    target: str,
+    fusion_mode: str,
+    tmp_dir: Path,
+) -> tuple[Path, subprocess.CompletedProcess[str]]:
+    script = opentileas_repo / "simulator" / "scripts" / "ascend_simu.py"
+    output_dir = tmp_dir / "lowered"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        str(script),
+        "lower",
+        "--repo",
+        str(opentileas_repo),
+        "--build-dir",
+        str(build_dir),
+        "--mlir",
+        str(mlir),
+        "--output-dir",
+        str(output_dir),
+        "--target",
+        target,
+        "--fusion-mode",
+        fusion_mode,
+    ]
+    result = run_command(cmd)
+    candidates = sorted(output_dir.glob("*.ll"))
+    if not candidates:
+        raise RuntimeError("OpenTileAS lowering did not produce an LLVM IR .ll file")
+    return candidates[0], result
+
+
+def run_lowered_case(
+    case_cfg: dict[str, Any],
+    asc_sim: Path,
+    opentileas_repo: Path,
+    build_dir: Path,
+    tmp_dir: Path,
+) -> dict[str, Any]:
+    mlir = (opentileas_repo / case_cfg["mlir"]).resolve()
+    lowered, lower_result = lower_opentile_case(
+        opentileas_repo,
+        build_dir,
+        mlir,
+        case_cfg.get("target", "dav-351x"),
+        case_cfg.get("fusion_mode", "no_fuse"),
+        tmp_dir / case_cfg["name"],
+    )
+    local_case = generated_vadd_case(
+        int(case_cfg.get("elements", 1024)),
+        int(case_cfg.get("ub_size_bytes", 12288)),
+        int(case_cfg.get("dma_bytes", 4096)),
+    )
+    work_case = tmp_dir / f"{case_cfg['name']}.case.json"
+    write_json(work_case, local_case)
+    result = run_command([str(asc_sim), str(lowered), "--case", str(work_case)])
+    status = classify_asc_status(result.returncode)
+    expected = case_cfg.get("expect_asc_status", "pass")
+    return {
+        "name": case_cfg["name"],
+        "kind": "lowered-opentile",
+        "status": status,
+        "expected": expected,
+        "ok": status == expected and lower_result.returncode == 0,
+        "returncode": result.returncode,
+        "lower_returncode": lower_result.returncode,
+        "lowered_ir": str(lowered),
+        "stderr_tail": tail(result.stderr),
+        "stdout_tail": tail(result.stdout),
+    }
+
+
+def run_simulator_case(
+    case_cfg: dict[str, Any],
+    opentileas_repo: Path,
+    build_dir: Path,
+    ssh: str,
+    developer: str,
+    launcher: str,
+) -> dict[str, Any]:
+    script = opentileas_repo / "simulator" / "scripts" / "ascend_simu.py"
+    run_id = safe_slug(f"asc-oracle-{case_cfg['name']}-{int(time.time())}")
+    cmd = [
+        sys.executable,
+        str(script),
+        "run",
+        "--repo",
+        str(opentileas_repo),
+        "--build-dir",
+        str(build_dir),
+        "--ssh",
+        ssh,
+        "--launcher",
+        launcher,
+        "--developer",
+        developer,
+        "--run-id",
+        run_id,
+        "--mlir",
+        str(opentileas_repo / case_cfg["mlir"]),
+        "--case-dir",
+        str(opentileas_repo / case_cfg["case_dir"]),
+        "--config",
+        case_cfg.get("config", "runner.json"),
+        "--core",
+        case_cfg.get("core", "vec"),
+        "--target",
+        case_cfg.get("target", "dav-351x"),
+    ]
+    result = run_command(cmd)
+    status = "pass" if result.returncode == 0 else "error"
+    expected = case_cfg.get("expect_simulator_status", "pass")
+    return {
+        "name": case_cfg["name"],
+        "kind": "simulator-oracle",
+        "status": status,
+        "expected": expected,
+        "ok": status == expected,
+        "returncode": result.returncode,
+        "local_run": parse_local_run(result.stdout),
+        "stderr_tail": tail(result.stderr),
+        "stdout_tail": tail(result.stdout),
+    }
+
+
+def safe_slug(text: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", text.strip())
+    return text.strip("-") or "run"
+
+
+def parse_local_run(output: str) -> str | None:
+    for line in output.splitlines():
+        if line.startswith("local run: "):
+            return line.split(": ", 1)[1]
+    return None
+
+
+def tail(text: str, lines: int = 12) -> str:
+    parts = [line for line in text.splitlines() if line.strip()]
+    return "\n".join(parts[-lines:])
+
+
+def print_report(results: list[dict[str, Any]]) -> None:
+    for item in results:
+        marker = "OK" if item["ok"] else "FAIL"
+        print(f"[{marker}] {item['name']} ({item['kind']}): {item['status']} expected {item['expected']}")
+        if item.get("local_run"):
+            print(f"  local_run: {item['local_run']}")
+        if not item["ok"] and item.get("stderr_tail"):
+            print("  stderr:")
+            for line in item["stderr_tail"].splitlines():
+                print(f"    {line}")
+    failures = [item for item in results if not item["ok"]]
+    print(f"summary: {len(results) - len(failures)}/{len(results)} checks passed")
+
+
+def main(argv: list[str]) -> int:
+    root = repo_root()
+    default_suite = root / "examples" / "davsim" / "vadd" / "oracle" / "vadd_oracle_suite.json"
+    default_opentileas = root.parent / "OpenTileAS"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--suite", type=Path, default=default_suite)
+    parser.add_argument("--asc-sim", type=Path, default=root / "build" / "bin" / "asc-sim")
+    parser.add_argument("--opentileas-repo", type=Path, default=default_opentileas)
+    parser.add_argument("--opentileas-build-dir", type=Path, default=default_opentileas / "build")
+    parser.add_argument("--skip-lowered", action="store_true")
+    parser.add_argument("--run-simulator", action="store_true")
+    parser.add_argument("--ssh", default=os.environ.get("ASCEND_SIM_SSH", "opentile-simu"))
+    parser.add_argument("--developer", default=os.environ.get("USER", "developer"))
+    parser.add_argument("--launcher", default="/usr/local/sbin/opentileas-simu-exec")
+    parser.add_argument("--report", type=Path)
+    args = parser.parse_args(argv)
+
+    suite_path = args.suite.resolve()
+    suite = load_json(suite_path)
+    suite_dir = suite_path.parent
+    asc_sim = args.asc_sim.resolve()
+    if not asc_sim.is_file():
+        raise SystemExit(f"asc-sim not found: {asc_sim}")
+
+    results: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="asc-sim-oracle-") as tmp:
+        tmp_dir = Path(tmp)
+        for case_cfg in suite.get("asc_cases", []):
+            results.append(run_asc_ir_case(case_cfg, suite_dir, asc_sim, tmp_dir))
+        if not args.skip_lowered:
+            for case_cfg in suite.get("lowered_cases", []):
+                results.append(
+                    run_lowered_case(
+                        case_cfg,
+                        asc_sim,
+                        args.opentileas_repo.resolve(),
+                        args.opentileas_build_dir.resolve(),
+                        tmp_dir,
+                    )
+                )
+        if args.run_simulator:
+            for case_cfg in suite.get("simulator_cases", []):
+                results.append(
+                    run_simulator_case(
+                        case_cfg,
+                        args.opentileas_repo.resolve(),
+                        args.opentileas_build_dir.resolve(),
+                        args.ssh,
+                        args.developer,
+                        args.launcher,
+                    )
+                )
+
+    print_report(results)
+    if args.report:
+        write_json(args.report.resolve(), {"results": results})
+    return 0 if all(item["ok"] for item in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -46,6 +46,13 @@ class TypedValue:
     addrspace: int | None = None
 
 
+@dataclass
+class PointerValue:
+    buffer: str
+    addrspace: int
+    byte_offset: int = 0
+
+
 def strip_comment(line: str) -> str:
     return line.split(";", 1)[0].strip()
 
@@ -100,7 +107,7 @@ def parse_typed_value(text: str) -> TypedValue:
 
 
 def parse_function_args(ir: str, entry: str) -> dict[str, int | None]:
-    m = re.search(rf"define\s+.*?@{re.escape(entry)}\s*\((.*?)\)\s*\{{", ir, re.S)
+    m = re.search(rf"define\s+.*?@{re.escape(entry)}\s*\((.*?)\)\s*(?:#[0-9]+\s*)?\{{", ir, re.S)
     if not m:
         raise SimError(f"entry function @{entry} not found")
     args: dict[str, int | None] = {}
@@ -170,6 +177,8 @@ class DavVAddSim:
         self.buffers = build_buffers(case)
         self.pointer_bindings = self._build_pointer_bindings()
         self.values: dict[str, Any] = {}
+        for name, value in case.get("scalars", {}).items():
+            self.values[name] = int(value)
         self.trace: list[str] = []
         self.unsupported: list[str] = []
         self.flags: set[tuple[int, int, int]] = set()
@@ -179,6 +188,8 @@ class DavVAddSim:
         explicit = self.case.get("arguments", {})
         bindings: dict[str, str] = {}
         for symbol, addrspace in self.arg_spaces.items():
+            if addrspace is None:
+                continue
             name = explicit.get(symbol, symbol.lstrip("%"))
             if name not in self.buffers:
                 raise SimError(f"argument {symbol} maps to missing buffer {name!r}")
@@ -189,6 +200,16 @@ class DavVAddSim:
                 )
             bindings[symbol] = name
         return bindings
+
+    def _implicit_entry_label(self) -> str:
+        numeric_args = [
+            int(symbol[1:])
+            for symbol in self.arg_spaces
+            if symbol.startswith("%") and symbol[1:].isdigit()
+        ]
+        if numeric_args:
+            return str(max(numeric_args) + 1)
+        return "entry"
 
     def _resolve_pointer(self, ptr: TypedValue, expected_space: str) -> tuple[Buffer, int]:
         expected_addrspace = GM_ADDRSPACE if expected_space == "gm" else UB_ADDRSPACE
@@ -201,13 +222,24 @@ class DavVAddSim:
             if expected_space != "ub":
                 raise SimError("integer pointer constants are only supported for UB")
             return self.buffers["__ub"], ptr.value
-        name = self.pointer_bindings.get(ptr.value)
-        if not name:
-            raise SimError(f"unbound pointer argument {ptr.value}")
-        buf = self.buffers[name]
+        bound = self.values.get(ptr.value)
+        if isinstance(bound, PointerValue):
+            if bound.addrspace != expected_addrspace:
+                raise SimError(
+                    f"pointer {ptr.value} resolves to addrspace({bound.addrspace}); "
+                    f"expected addrspace({expected_addrspace})"
+                )
+            buf = self.buffers[bound.buffer]
+            byte_offset = bound.byte_offset
+        else:
+            name = self.pointer_bindings.get(ptr.value)
+            if not name:
+                raise SimError(f"unbound pointer argument {ptr.value}")
+            buf = self.buffers[name]
+            byte_offset = 0
         if buf.space != expected_space:
-            raise SimError(f"buffer {name} is in {buf.space}; expected {expected_space}")
-        return buf, 0
+            raise SimError(f"buffer {buf.name} is in {buf.space}; expected {expected_space}")
+        return buf, byte_offset
 
     def _check_region(self, buf: Buffer, byte_offset: int, byte_count: int, op: str) -> int:
         if byte_offset < 0:
@@ -243,18 +275,104 @@ class DavVAddSim:
         dst.values[dst_start : dst_start + count] = src.values[src_start : src_start + count]
 
     def run(self) -> None:
-        for raw in self.ir.splitlines():
-            line = strip_comment(raw)
-            if not line:
+        instructions, labels = self._parse_function_body()
+        current_label = "entry" if "entry" in labels else self._implicit_entry_label()
+        pc = labels.get(current_label, 0)
+        last_block = current_label
+        steps = 0
+        max_steps = int(self.case.get("max_steps", 100000))
+        while pc < len(instructions):
+            steps += 1
+            if steps > max_steps:
+                raise SimError(f"execution exceeded max_steps={max_steps}")
+            line = instructions[pc]
+            if line == "ret void" or line.startswith("ret "):
+                break
+            phi = self._try_execute_phi(line, last_block)
+            if phi:
+                pc += 1
+                continue
+            branch = self._execute_branch(line)
+            if branch is not None:
+                next_label = branch
+                if next_label not in labels:
+                    raise SimError(f"branch targets unknown label %{next_label}")
+                last_block = current_label
+                current_label = next_label
+                pc = labels[next_label]
                 continue
             self._execute_line(line)
+            pc += 1
 
         if self.unsupported:
             uniq = sorted(set(self.unsupported))
             raise SimError("unsupported llvm.hivm intrinsic(s): " + ", ".join(uniq))
 
+    def _parse_function_body(self) -> tuple[list[str], dict[str, int]]:
+        m = re.search(
+            rf"define\s+.*?@{re.escape(self.entry)}\s*\(.*?\)\s*(?:#[0-9]+\s*)?\{{",
+            self.ir,
+            re.S,
+        )
+        if not m:
+            raise SimError(f"entry function @{self.entry} not found")
+        body_text = self.ir[m.end() :]
+        body_text = body_text.split("\n}", 1)[0]
+        instructions: list[str] = []
+        implicit_entry = self._implicit_entry_label()
+        labels: dict[str, int] = {implicit_entry: 0}
+        for raw in body_text.splitlines():
+            line = strip_comment(raw)
+            if not line:
+                continue
+            label = re.match(r"^([A-Za-z0-9_.$-]+):$", line)
+            if label:
+                labels[label.group(1).lstrip("%")] = len(instructions)
+                continue
+            if line.startswith("declare "):
+                continue
+            instructions.append(line)
+        return instructions, labels
+
+    def _execute_branch(self, line: str) -> str | None:
+        unconditional = re.match(r"br\s+label\s+%?([A-Za-z0-9_.$-]+)$", line)
+        if unconditional:
+            return unconditional.group(1)
+        conditional = re.match(
+            r"br\s+i1\s+([^,]+),\s+label\s+%?([A-Za-z0-9_.$-]+),\s+label\s+%?([A-Za-z0-9_.$-]+)$",
+            line,
+        )
+        if conditional:
+            cond = self._as_bool(parse_typed_value(conditional.group(1)), "branch condition")
+            return conditional.group(2) if cond else conditional.group(3)
+        return None
+
+    def _try_execute_phi(self, line: str, last_block: str) -> bool:
+        m = re.match(r"(%[-A-Za-z0-9_.$]+)\s*=\s*phi\s+\S+\s+(.+)$", line)
+        if not m:
+            return False
+        lhs = m.group(1)
+        incoming = re.findall(r"\[\s*([^,\]]+)\s*,\s+%?([A-Za-z0-9_.$-]+)\s*\]", m.group(2))
+        for value_text, label in incoming:
+            if label == last_block:
+                self.values[lhs] = self._read_scalar_or_pointer(parse_typed_value(value_text))
+                self.trace.append(f"{lhs} = phi({label})")
+                return True
+        raise SimError(f"{lhs}: no phi incoming edge for %{last_block}")
+
     def _execute_line(self, line: str) -> None:
         if line.startswith("declare "):
+            return
+
+        if self._execute_scalar_or_pointer_line(line):
+            return
+
+        generic_call = re.search(
+            r"(?:(%[-A-Za-z0-9_.$]+)\s*=\s*)?call\s+.*?(@llvm\.[^(]+)\((.*)\)",
+            line,
+        )
+        if generic_call and not generic_call.group(2).startswith("@llvm.hivm."):
+            self._execute_generic_call(generic_call.group(1), generic_call.group(2), generic_call.group(3))
             return
 
         call = re.search(r"(?:(%[-A-Za-z0-9_.$]+)\s*=\s*)?call\s+.*?(@llvm\.hivm\.[^(]+)\((.*)\)", line)
@@ -284,11 +402,25 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = GET.CTRL()")
             return
 
+        if name == "@llvm.hivm.GET.BLOCK.IDX":
+            if lhs is None:
+                raise SimError("GET.BLOCK.IDX result is unused")
+            self.values[lhs] = int(self.case.get("block_idx", 0))
+            self.trace.append(f"{lhs} = GET.BLOCK.IDX()")
+            return
+
         if name == "@llvm.hivm.SBITSET0":
             if lhs is None:
                 raise SimError("SBITSET0 result is unused")
             self.values[lhs] = self._as_int(args[0], "SBITSET0 value")
             self.trace.append(f"{lhs} = SBITSET0({args[0].value}, {args[1].value})")
+            return
+
+        if name == "@llvm.hivm.SBITSET1":
+            if lhs is None:
+                raise SimError("SBITSET1 result is unused")
+            self.values[lhs] = self._as_int(args[0], "SBITSET1 value")
+            self.trace.append(f"{lhs} = SBITSET1({args[0].value}, {args[1].value})")
             return
 
         if name == "@llvm.hivm.SET.CTRL":
@@ -356,7 +488,7 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = vldsx1(UB, byte_offset={base_byte + byte_offset})")
             return
 
-        if name == "@llvm.hivm.vadd.v64f32.x":
+        if name in ("@llvm.hivm.vadd.v64f32.x", "@llvm.hivm.vadd.s.x.v64f32"):
             if lhs is None:
                 raise SimError("vadd result is unused")
             if len(args) != 3:
@@ -380,8 +512,8 @@ class DavVAddSim:
             norm = self._as_int(args[3], "vstsx1 norm")
             postupdate = self._as_int(args[4], "vstsx1 postupdate")
             mask = self._as_mask(args[5], "vstsx1 mask")
-            if norm != 0 or postupdate != 0:
-                raise SimError("vstsx1 milestone supports norm=0 and postupdate=0 only")
+            if norm not in (0, 2) or postupdate != 0:
+                raise SimError("vstsx1 milestone supports norm=0/2 and postupdate=0 only")
             start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V64F32, "vstsx1")
             for idx, active in enumerate(mask):
                 if not active:
@@ -395,6 +527,115 @@ class DavVAddSim:
 
         self.unsupported.append(name)
 
+    def _execute_scalar_or_pointer_line(self, line: str) -> bool:
+        ptrtoint = re.match(
+            r"(%[-A-Za-z0-9_.$]+)\s*=\s*ptrtoint\s+(ptr(?:\s+addrspace\(\d+\))?\s+%[-A-Za-z0-9_.$]+)\s+to\s+i\d+$",
+            line,
+        )
+        if ptrtoint:
+            lhs = ptrtoint.group(1)
+            ptr = parse_typed_value(ptrtoint.group(2))
+            expected_space = "gm" if ptr.addrspace == GM_ADDRSPACE else "ub"
+            buf, byte_offset = self._resolve_pointer(ptr, expected_space)
+            self.values[lhs] = PointerValue(buf.name, ptr.addrspace or GM_ADDRSPACE, byte_offset)
+            self.trace.append(f"{lhs} = ptrtoint({buf.name}+{byte_offset})")
+            return True
+
+        inttoptr = re.match(
+            r"(%[-A-Za-z0-9_.$]+)\s*=\s*inttoptr\s+i\d+\s+(.+?)\s+to\s+ptr(?:\s+addrspace\((\d+)\))?$",
+            line,
+        )
+        if inttoptr:
+            lhs = inttoptr.group(1)
+            addrspace = int(inttoptr.group(3)) if inttoptr.group(3) else None
+            raw = self._read_scalar_or_pointer(parse_typed_value(inttoptr.group(2)))
+            if isinstance(raw, PointerValue):
+                self.values[lhs] = PointerValue(raw.buffer, addrspace or raw.addrspace, raw.byte_offset)
+            elif isinstance(raw, int):
+                if addrspace != UB_ADDRSPACE:
+                    raise SimError("integer inttoptr is only supported for UB pointers")
+                self.values[lhs] = PointerValue("__ub", addrspace, raw)
+            else:
+                raise SimError(f"{lhs}: cannot inttoptr {raw!r}")
+            self.trace.append(f"{lhs} = inttoptr(...)")
+            return True
+
+        cast = re.match(r"(%[-A-Za-z0-9_.$]+)\s*=\s*(?:trunc|sext)\s+i\d+\s+(.+?)\s+to\s+i\d+$", line)
+        if cast:
+            self.values[cast.group(1)] = self._as_int(parse_typed_value(cast.group(2)), "integer cast")
+            return True
+
+        binary = re.match(
+            r"(%[-A-Za-z0-9_.$]+)\s*=\s*(add|sub|mul|and|or|shl)\s+i\d+\s+([^,]+),\s+(.+)$",
+            line,
+        )
+        if binary:
+            lhs, op = binary.group(1), binary.group(2)
+            left = self._read_scalar_or_pointer(parse_typed_value(binary.group(3)))
+            right = self._read_scalar_or_pointer(parse_typed_value(binary.group(4)))
+            self.values[lhs] = self._eval_binary(op, left, right, lhs)
+            return True
+
+        icmp = re.match(r"(%[-A-Za-z0-9_.$]+)\s*=\s*icmp\s+(sle|slt)\s+i\d+\s+([^,]+),\s+(.+)$", line)
+        if icmp:
+            lhs = icmp.group(1)
+            left = self._as_int(parse_typed_value(icmp.group(3)), "icmp lhs")
+            right = self._as_int(parse_typed_value(icmp.group(4)), "icmp rhs")
+            self.values[lhs] = left <= right if icmp.group(2) == "sle" else left < right
+            return True
+
+        return False
+
+    def _execute_generic_call(self, lhs: str | None, name: str, arg_text: str) -> None:
+        args = [parse_typed_value(a) for a in split_args(arg_text)]
+        if name == "@llvm.smax.i32":
+            if lhs is None:
+                raise SimError("smax result is unused")
+            self.values[lhs] = max(self._as_int(args[0], "smax lhs"), self._as_int(args[1], "smax rhs"))
+            return
+        if name == "@llvm.smin.i32":
+            if lhs is None:
+                raise SimError("smin result is unused")
+            self.values[lhs] = min(self._as_int(args[0], "smin lhs"), self._as_int(args[1], "smin rhs"))
+            return
+        raise SimError(f"unsupported LLVM intrinsic {name}")
+
+    def _eval_binary(
+        self, op: str, left: int | PointerValue, right: int | PointerValue, lhs: str
+    ) -> int | PointerValue:
+        if isinstance(left, PointerValue) or isinstance(right, PointerValue):
+            if op not in ("add", "sub"):
+                raise SimError(f"{lhs}: pointer arithmetic only supports add/sub")
+            if isinstance(left, PointerValue) and isinstance(right, int):
+                delta = right if op == "add" else -right
+                return PointerValue(left.buffer, left.addrspace, left.byte_offset + delta)
+            if op == "add" and isinstance(right, PointerValue) and isinstance(left, int):
+                return PointerValue(right.buffer, right.addrspace, right.byte_offset + left)
+            raise SimError(f"{lhs}: invalid pointer arithmetic operands")
+        if op == "add":
+            return left + right
+        if op == "sub":
+            return left - right
+        if op == "mul":
+            return left * right
+        if op == "and":
+            return left & right
+        if op == "or":
+            return left | right
+        if op == "shl":
+            return left << right
+        raise SimError(f"{lhs}: unsupported binary op {op}")
+
+    def _read_scalar_or_pointer(self, value: TypedValue) -> int | bool | PointerValue:
+        if isinstance(value.value, int):
+            return value.value
+        if value.value not in self.values:
+            raise SimError(f"unknown SSA value {value.value}")
+        bound = self.values[value.value]
+        if isinstance(bound, (int, bool, PointerValue)):
+            return bound
+        raise SimError(f"{value.value}: expected scalar or pointer, got vector/mask")
+
     def _as_int(self, value: TypedValue, label: str) -> int:
         if isinstance(value.value, int):
             return value.value
@@ -402,6 +643,14 @@ class DavVAddSim:
         if isinstance(bound, int):
             return bound
         raise SimError(f"{label}: expected integer, got {value.value}")
+
+    def _as_bool(self, value: TypedValue, label: str) -> bool:
+        if isinstance(value.value, int):
+            return bool(value.value)
+        bound = self.values.get(value.value)
+        if isinstance(bound, bool):
+            return bound
+        raise SimError(f"{label}: expected i1, got {value.value}")
 
     def _as_vector(
         self, value: TypedValue, label: str, allow_inactive: bool = False

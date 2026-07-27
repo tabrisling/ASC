@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "description": "dav vadd checks that compare ASC local modeling with OpenTileAS simulator oracle coverage.",
+  "asc_cases": [
+    {
+      "name": "gm_ub_register_vadd_64",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "gm_to_ub_misaligned_dst",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "expect_asc_status": "error",
+      "replacements": [
+        {
+          "old": "ptr addrspace(6) inttoptr (i64 256 to ptr addrspace(6)), ptr addrspace(1) %b",
+          "new": "ptr addrspace(6) inttoptr (i64 260 to ptr addrspace(6)), ptr addrspace(1) %b"
+        }
+      ]
+    },
+    {
+      "name": "register_store_misaligned_ub",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "expect_asc_status": "error",
+      "replacements": [
+        {
+          "old": "@llvm.hivm.vstsx1.v64f32(<64 x float> %sum, ptr addrspace(6) inttoptr (i64 512 to ptr addrspace(6))",
+          "new": "@llvm.hivm.vstsx1.v64f32(<64 x float> %sum, ptr addrspace(6) inttoptr (i64 516 to ptr addrspace(6))"
+        }
+      ]
+    },
+    {
+      "name": "gm_output_overflow",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "expect_asc_status": "error",
+      "case_overrides": {
+        "buffers": {
+          "out": {
+            "size": 16
+          }
+        }
+      }
+    },
+    {
+      "name": "wait_without_matching_set",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "expect_asc_status": "error",
+      "replacements": [
+        {
+          "old": "  call void @llvm.hivm.SET.FLAG.IMM(i64 4, i64 1, i64 0)\n",
+          "new": ""
+        }
+      ]
+    }
+  ],
+  "lowered_cases": [
+    {
+      "name": "opentile_vector_add_lowered_1024",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
+    }
+  ],
+  "simulator_cases": [
+    {
+      "name": "opentile_vector_add_simulator_1024",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "expect_simulator_status": "pass"
+    }
+  ]
+}
