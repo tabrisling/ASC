@@ -120,18 +120,24 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f16.DV",
     "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+    "@llvm.hivm.init.vector.align.data",
     "@llvm.hivm.mem.bar.vv.all",
     "@llvm.hivm.pset.b8",
     "@llvm.hivm.pset.b16",
     "@llvm.hivm.pset.b32",
     "@llvm.hivm.pldi.b8",
     "@llvm.hivm.plds.b8",
+    "@llvm.hivm.plt.b16.v300",
+    "@llvm.hivm.plt.b32.v300",
     "@llvm.hivm.psti.b8",
     "@llvm.hivm.psts.b8",
+    "@llvm.hivm.pstu.b16",
+    "@llvm.hivm.pstu.b32",
     "@llvm.hivm.vldsx1.v128f16",
     "@llvm.hivm.vldsx1.v64f32",
     "@llvm.hivm.vstsx1.v128f16",
     "@llvm.hivm.vstsx1.v64f32",
+    "@llvm.hivm.vstas",
     "@llvm.hivm.vadd.v64f32.x",
     "@llvm.hivm.vadd.s.x.v64f32",
     "@llvm.hivm.vsub.s.x.v64f32",
@@ -790,6 +796,40 @@ def patch_mask_patterns(ir_text: str, case_cfg: dict[str, Any]) -> str:
 
 
 def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
+    if generated == "a5_pstu_stream_256":
+        seed = [0xA5] * 256
+
+        def pack_prefix(active_lanes: int, lanes: int) -> list[int]:
+            packed: list[int] = []
+            for byte_base in range(0, lanes, 8):
+                value = 0
+                for bit in range(8):
+                    if byte_base + bit < active_lanes:
+                        value |= 1 << bit
+                packed.append(value)
+            return packed
+
+        golden = list(seed)
+        golden[0:16] = pack_prefix(1, 128)
+        golden[16:32] = pack_prefix(127, 128)
+        golden[32:40] = pack_prefix(13, 64)
+        golden[40:48] = pack_prefix(7, 64)
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_pstu_stream",
+                "arguments": {"%seed": "seed", "%output": "output"},
+                "buffers": {
+                    "seed": {"space": "gm", "dtype": "u8", "values": seed},
+                    "output": {"space": "gm", "dtype": "u8", "size": 256},
+                },
+                "ub_dtype": "u8",
+                "ub_size_bytes": 256,
+                "dma_bytes": 256,
+                "checks": [{"buffer": "output", "golden": golden, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
     if generated == "a5_predicate_immediate_32":
         seed = [0] * 32
         golden = [0] * 32

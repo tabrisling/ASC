@@ -138,11 +138,16 @@ class PointerValue:
 
 @dataclass
 class AggregateValue:
-    elements: list[list[float | None]]
+    elements: list[Any]
 
 
 @dataclass
 class PredicateBytes:
+    values: list[int]
+
+
+@dataclass
+class AlignData:
     values: list[int]
 
 
@@ -612,6 +617,20 @@ class DavVAddSim:
         name = call.group(2)
         args = [parse_typed_value(a) for a in split_args(call.group(3))]
 
+        if name in ("@llvm.hivm.plt.b16.v300", "@llvm.hivm.plt.b32.v300"):
+            if lhs is None:
+                raise SimError("plt result is unused")
+            if len(args) != 1:
+                raise SimError(f"{name}: expected 1 arg, got {len(args)}")
+            lanes = LANES_F16_V128 if name.endswith(".b16.v300") else LANES_F32_V64
+            active = self._as_int(args[0], "plt active lanes")
+            if active < 0 or active > lanes:
+                raise SimError(f"{name}: active lane count {active} out of range for {lanes} lanes")
+            mask = [idx < active for idx in range(lanes)] + [False] * (256 - lanes)
+            self.values[lhs] = AggregateValue([mask, active])
+            self.trace.append(f"{lhs} = {name.rsplit('.', 2)[-2]}({active})")
+            return
+
         if name == "@llvm.hivm.pset.b8":
             if lhs is None:
                 raise SimError("pset result is unused")
@@ -687,6 +706,15 @@ class DavVAddSim:
             if args:
                 raise SimError(f"{name}: expected 0 args, got {len(args)}")
             self.trace.append("mem.bar.vv.all()")
+            return
+
+        if name == "@llvm.hivm.init.vector.align.data":
+            if lhs is None:
+                raise SimError("init.vector.align.data result is unused")
+            if args:
+                raise SimError(f"{name}: expected 0 args, got {len(args)}")
+            self.values[lhs] = AlignData([0] * PREDICATE_BYTES_B8)
+            self.trace.append(f"{lhs} = init.vector.align.data()")
             return
 
         if name in (
@@ -1025,6 +1053,36 @@ class DavVAddSim:
             self.trace.append(f"{op_label}({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
             return
 
+        if name in ("@llvm.hivm.pstu.b16", "@llvm.hivm.pstu.b32"):
+            if lhs is None:
+                raise SimError("pstu result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            lanes = LANES_F16_V128 if name.endswith(".b16") else LANES_F32_V64
+            mask = self._as_mask(args[0], "pstu predicate", lanes=lanes)
+            buf, base_byte = self._resolve_pointer(args[1], "ub", preferred_dtype="u8")
+            align = self._as_align_data(args[2], "pstu align data")
+            packed = self._pack_prefix_mask(mask, lanes, name)
+            start = self._check_region(buf, base_byte, len(packed), name, alignment=1)
+            for idx, value in enumerate(packed):
+                buf.values[start + idx] = round_dtype(value, buf.dtype)
+            next_ptr = PointerValue(buf.name, UB_ADDRSPACE, base_byte + len(packed))
+            self.values[lhs] = AggregateValue([align, next_ptr])
+            self.trace.append(f"{lhs} = {name.rsplit('.', 1)[-1]}(UB, byte_offset={base_byte})")
+            return
+
+        if name == "@llvm.hivm.vstas":
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            self._as_align_data(args[0], "vstas align data")
+            self._resolve_pointer(args[1], "ub", preferred_dtype="u8")
+            mode = self._as_int(args[2], "vstas mode")
+            postupdate = self._as_int(args[3], "vstas postupdate")
+            if mode != 0 or postupdate != 0:
+                raise SimError("vstas milestone supports mode=0 and postupdate=0 only")
+            self.trace.append(f"vstas({args[0].value}, {args[1].value})")
+            return
+
         self.unsupported.append(name)
 
     def _map_unary_vector(
@@ -1192,6 +1250,21 @@ class DavVAddSim:
         values[:B8_FULL_ACTIVE_STORED_BYTES] = [0xFF] * B8_FULL_ACTIVE_STORED_BYTES
         return PredicateBytes(values)
 
+    def _pack_prefix_mask(self, mask: list[bool], lanes: int, op_label: str) -> list[int]:
+        active = 0
+        while active < lanes and mask[active]:
+            active += 1
+        if any(mask[active:lanes]):
+            raise SimError(f"{op_label}: milestone supports prefix-active predicates only")
+        packed: list[int] = []
+        for byte_base in range(0, lanes, 8):
+            value = 0
+            for bit in range(8):
+                if mask[byte_base + bit]:
+                    value |= 1 << bit
+            packed.append(value)
+        return packed
+
     def _execute_scalar_or_pointer_line(self, line: str) -> bool:
         shufflevector = re.match(
             r"(%[-A-Za-z0-9_.$]+)\s*=\s*shufflevector\s+<64 x float>\s+([^,]+),\s+<64 x float>\s+([^,]+),\s+<128 x i32>\s+<(.+)>$",
@@ -1214,7 +1287,7 @@ class DavVAddSim:
             return True
 
         extractvalue = re.match(
-            r"(%[-A-Za-z0-9_.$]+)\s*=\s*extractvalue\s+\{\s*<64 x float>,\s*<64 x float>\s*\}\s+(%[-A-Za-z0-9_.$]+),\s+([01])$",
+            r"(%[-A-Za-z0-9_.$]+)\s*=\s*extractvalue\s+\{.*\}\s+(%[-A-Za-z0-9_.$]+),\s+(\d+)$",
             line,
         )
         if extractvalue:
@@ -1224,7 +1297,10 @@ class DavVAddSim:
             aggregate = self.values.get(aggregate_name)
             if not isinstance(aggregate, AggregateValue):
                 raise SimError(f"{lhs}: expected aggregate value {aggregate_name}")
-            self.values[lhs] = list(aggregate.elements[index])
+            if index < 0 or index >= len(aggregate.elements):
+                raise SimError(f"{lhs}: aggregate index {index} out of range")
+            element = aggregate.elements[index]
+            self.values[lhs] = list(element) if isinstance(element, list) else element
             self.trace.append(f"{lhs} = extractvalue({aggregate_name}, {index})")
             return True
 
@@ -1403,6 +1479,14 @@ class DavVAddSim:
         if not isinstance(pred, PredicateBytes) or len(pred.values) != PREDICATE_BYTES_B8:
             raise SimError(f"{label}: expected b8 predicate payload")
         return pred
+
+    def _as_align_data(self, value: TypedValue, label: str) -> AlignData:
+        if not isinstance(value.value, str) or value.value not in self.values:
+            raise SimError(f"{label}: unknown align data {value.value}")
+        align = self.values[value.value]
+        if not isinstance(align, AlignData) or len(align.values) != PREDICATE_BYTES_B8:
+            raise SimError(f"{label}: expected vector<32xi8> align data")
+        return align
 
     def check(self) -> tuple[bool, list[str]]:
         failures: list[str] = []
