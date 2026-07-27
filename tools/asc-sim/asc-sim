@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 
 LANES_F32_V64 = 64
+LANES_F32_V128 = 128
 F32_BYTES = 4
 VECTOR_BYTES_V64F32 = LANES_F32_V64 * F32_BYTES
 GM_ADDRSPACE = 1
@@ -65,6 +66,10 @@ REDUCTION_VECTOR_OPS = {
     "@llvm.hivm.vcadd.s.x.v64f32": "vcadd",
 }
 
+VMULL_VECTOR_OPS = {
+    "@llvm.hivm.vmull.s.x.v64f32": "vmull",
+}
+
 
 class SimError(RuntimeError):
     pass
@@ -89,6 +94,11 @@ class PointerValue:
     buffer: str
     addrspace: int
     byte_offset: int = 0
+
+
+@dataclass
+class AggregateValue:
+    elements: list[list[float | None]]
 
 
 def strip_comment(line: str) -> str:
@@ -128,6 +138,9 @@ def parse_typed_value(text: str) -> TypedValue:
 
     if "null" in text and addrspace is not None:
         return TypedValue(0, addrspace)
+
+    if re.search(r"\bundef\b", text):
+        return TypedValue("undef", addrspace)
 
     m_float = re.search(
         r"(?:float|double)\s+([+-]?(?:nan|inf|infinity|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?))\s*$",
@@ -662,6 +675,9 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = {op_label}({args[0].value}, {args[1].value})")
             return
 
+        if name in VMULL_VECTOR_OPS:
+            raise SimError("vmull.x is fail-closed: dav-c310 ccec crashes on the materialized oracle IR")
+
         if name == "@llvm.hivm.vdups.z.v64f32":
             if lhs is None:
                 raise SimError("vdups result is unused")
@@ -798,6 +814,41 @@ class DavVAddSim:
         return [total] + [0.0] * (LANES_F32_V64 - 1)
 
     def _execute_scalar_or_pointer_line(self, line: str) -> bool:
+        shufflevector = re.match(
+            r"(%[-A-Za-z0-9_.$]+)\s*=\s*shufflevector\s+<64 x float>\s+([^,]+),\s+<64 x float>\s+([^,]+),\s+<128 x i32>\s+<(.+)>$",
+            line,
+        )
+        if shufflevector:
+            lhs = shufflevector.group(1)
+            left = self._as_vector(parse_typed_value(shufflevector.group(2)), "shufflevector lhs")
+            right = self._as_vector(parse_typed_value(shufflevector.group(3)), "shufflevector rhs")
+            indices = [int(item) for item in re.findall(r"i32\s+(-?\d+)", shufflevector.group(4))]
+            if len(indices) != LANES_F32_V128:
+                raise SimError(f"{lhs}: expected {LANES_F32_V128} shufflevector indices")
+            combined: list[float | None] = []
+            for index in indices:
+                if index < 0 or index >= LANES_F32_V128:
+                    raise SimError(f"{lhs}: shufflevector index {index} out of range")
+                combined.append(left[index] if index < LANES_F32_V64 else right[index - LANES_F32_V64])
+            self.values[lhs] = combined
+            self.trace.append(f"{lhs} = shufflevector({shufflevector.group(2)}, {shufflevector.group(3)})")
+            return True
+
+        extractvalue = re.match(
+            r"(%[-A-Za-z0-9_.$]+)\s*=\s*extractvalue\s+\{\s*<64 x float>,\s*<64 x float>\s*\}\s+(%[-A-Za-z0-9_.$]+),\s+([01])$",
+            line,
+        )
+        if extractvalue:
+            lhs = extractvalue.group(1)
+            aggregate_name = extractvalue.group(2)
+            index = int(extractvalue.group(3))
+            aggregate = self.values.get(aggregate_name)
+            if not isinstance(aggregate, AggregateValue):
+                raise SimError(f"{lhs}: expected aggregate value {aggregate_name}")
+            self.values[lhs] = list(aggregate.elements[index])
+            self.trace.append(f"{lhs} = extractvalue({aggregate_name}, {index})")
+            return True
+
         ptrtoint = re.match(
             r"(%[-A-Za-z0-9_.$]+)\s*=\s*ptrtoint\s+(ptr(?:\s+addrspace\(\d+\))?\s+%[-A-Za-z0-9_.$]+)\s+to\s+i\d+$",
             line,
@@ -940,13 +991,17 @@ class DavVAddSim:
         raise SimError(f"{label}: expected i1, got {value.value}")
 
     def _as_vector(
-        self, value: TypedValue, label: str, allow_inactive: bool = False
+        self,
+        value: TypedValue,
+        label: str,
+        allow_inactive: bool = False,
+        lanes: int = LANES_F32_V64,
     ) -> list[float | None]:
         if not isinstance(value.value, str) or value.value not in self.values:
             raise SimError(f"{label}: unknown vector {value.value}")
         vec = self.values[value.value]
-        if not isinstance(vec, list) or len(vec) != LANES_F32_V64:
-            raise SimError(f"{label}: expected vector<{LANES_F32_V64}xf32>")
+        if not isinstance(vec, list) or len(vec) != lanes:
+            raise SimError(f"{label}: expected vector<{lanes}xf32>")
         if not allow_inactive and any(x is None for x in vec):
             raise SimError(f"{label}: vector contains inactive lanes")
         return vec

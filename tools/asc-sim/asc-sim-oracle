@@ -90,6 +90,12 @@ VECTOR_REDUCTION_INTRINSICS = {
     "vcadd": "@llvm.hivm.vcadd.s.x.v64f32",
 }
 
+VECTOR_VMULL_INTRINSICS = {
+    ("vmull", "x"): "@llvm.hivm.vmull.s.x.v64f32",
+    ("vmull", "m"): "@llvm.hivm.vmull.s.m.v64f32",
+    ("vmull", "z"): "@llvm.hivm.vmull.s.z.v64f32",
+}
+
 
 def load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
@@ -187,6 +193,7 @@ def run_asc_ir_case(
             lowered=False,
             mode=mode,
             part=int(case_cfg.get("part", 0)),
+            extract=int(case_cfg.get("extract", 0)),
         )
         apply_vector_op_case(
             case_json,
@@ -194,6 +201,7 @@ def run_asc_ir_case(
             float(case_cfg.get("scalar", case_cfg_scalar_default(op))),
             mode,
             int(case_cfg.get("mask_pattern", 0)),
+            int(case_cfg.get("extract", 0)),
         )
     ir_text = patch_mask_patterns(ir_text, case_cfg)
 
@@ -225,12 +233,32 @@ def generated_vector_case(
     ub_size_bytes: int,
     dma_bytes: int,
     mask_pattern: int = 0,
+    extract: int = 0,
 ) -> dict[str, Any]:
     x, y = generated_inputs(op, allocated_elements)
     scalar = float(case_cfg_scalar_default(op))
     active = max(0, min(n_elements, allocated_elements))
     mask = pattern_to_mask(mask_pattern)
     golden = [0.0] * allocated_elements
+    if op == "vmull":
+        if extract not in (0, 1):
+            raise RuntimeError(f"unsupported vmull extract index {extract}")
+        source = x if extract == 0 else y
+        for idx in range(active):
+            golden[idx] = f32(source[idx] * source[idx])
+        return {
+            "entry": "add_kernel",
+            "arguments": {"%0": "x", "%1": "y", "%2": "output"},
+            "scalars": {"%3": n_elements},
+            "buffers": {
+                "x": {"space": "gm", "dtype": "f32", "values": x},
+                "y": {"space": "gm", "dtype": "f32", "values": y},
+                "output": {"space": "gm", "dtype": "f32", "size": allocated_elements},
+            },
+            "ub_size_bytes": ub_size_bytes,
+            "dma_bytes": dma_bytes,
+            "checks": [{"buffer": "output", "golden": golden, "atol": 0, "rtol": 0}],
+        }
     if op == "vcadd":
         for group_start in range(0, active, 64):
             group_end = min(group_start + 64, active)
@@ -414,11 +442,21 @@ def apply_vector_op_case(
     scalar: float,
     mode: str = "x",
     mask_pattern: int = 0,
+    extract: int = 0,
 ) -> None:
     a = [float(x) for x in case_json["buffers"]["a"]["values"]]
     b = [float(x) for x in case_json["buffers"]["b"]["values"]]
     mask = pattern_to_mask(mask_pattern)
     golden = []
+    if op == "vmull":
+        source = a if extract == 0 else b
+        for idx, x in enumerate(source):
+            if mask[idx % 64]:
+                golden.append(f32(x * x))
+            else:
+                golden.append(0.0)
+        case_json["checks"][0]["golden"] = golden
+        return
     if op == "vcadd":
         for group_start in range(0, len(a), 64):
             group = a[group_start : group_start + 64]
@@ -451,6 +489,8 @@ def apply_vector_op_case(
 def op_intrinsic(op: str, mode: str = "x") -> str:
     if (op, mode) in VECTOR_BINARY_MODE_INTRINSICS:
         return VECTOR_BINARY_MODE_INTRINSICS[(op, mode)]
+    if (op, mode) in VECTOR_VMULL_INTRINSICS:
+        return VECTOR_VMULL_INTRINSICS[(op, mode)]
     if (op, mode) in VECTOR_SCALAR_MODE_INTRINSICS:
         return VECTOR_SCALAR_MODE_INTRINSICS[(op, mode)]
     if mode != "x":
@@ -476,6 +516,7 @@ def patch_vector_compute_ir(
     lowered: bool,
     mode: str = "x",
     part: int = 0,
+    extract: int = 0,
 ) -> str:
     if op == "vadd" and mode == "x":
         return ir_text
@@ -497,6 +538,23 @@ def patch_vector_compute_ir(
             return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <64 x float> {b}, <256 x i1> {mask}, i32 {part})"
         if op in VECTOR_REDUCTION_INTRINSICS:
             return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <256 x i1> {mask})"
+        if op == "vmull":
+            if mode != "x":
+                return (
+                    f"{lhs} = call {{ <64 x float>, <64 x float> }} {target}"
+                    f"(<128 x float> undef, <128 x float> undef, <256 x i1> {mask}, <64 x float> undef)"
+                )
+            shuffle_mask = ", ".join(f"i32 {idx}" for idx in range(128))
+            suffix = re.sub(r"[^A-Za-z0-9_]+", "_", lhs.lstrip("%")).strip("_") or "result"
+            vec_name = f"%asc_vmull_vec_{suffix}"
+            agg_name = f"%asc_vmull_agg_{suffix}"
+            return "\n".join(
+                [
+                    f"{vec_name} = shufflevector <64 x float> {a}, <64 x float> {b}, <128 x i32> <{shuffle_mask}>",
+                    f"{agg_name} = call {{ <64 x float>, <64 x float> }} {target}(<128 x float> {vec_name}, <128 x float> {vec_name}, <256 x i1> {mask}, <64 x float> undef)",
+                    f"{lhs} = extractvalue {{ <64 x float>, <64 x float> }} {agg_name}, {extract}",
+                ]
+            )
         if op in VECTOR_UNARY_INTRINSICS:
             return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <256 x i1> {mask})"
         if op in VECTOR_SCALAR_INTRINSICS:
@@ -518,6 +576,8 @@ def patch_vector_compute_ir(
         declare_target = f"declare <64 x float> {target}(<64 x float>, <64 x float>, <256 x i1>, i32)"
     elif op in VECTOR_REDUCTION_INTRINSICS:
         declare_target = f"declare <64 x float> {target}(<64 x float>, <256 x i1>)"
+    elif op == "vmull":
+        declare_target = f"declare {{ <64 x float>, <64 x float> }} {target}(<128 x float>, <128 x float>, <256 x i1>, <64 x float>)"
     elif op in VECTOR_UNARY_INTRINSICS:
         declare_target = f"declare <64 x float> {target}(<64 x float>, <256 x i1>)"
     elif op in VECTOR_SCALAR_INTRINSICS:
@@ -669,6 +729,7 @@ def materialize_lowered_ir(
             lowered=True,
             mode=mode,
             part=int(case_cfg.get("part", 0)),
+            extract=int(case_cfg.get("extract", 0)),
         )
     text = patch_mask_patterns(text, case_cfg)
     if op == "vadd" and mode == "x" and not any(k in case_cfg for k in ("mask_pattern", "store_mask_pattern")):
@@ -699,6 +760,7 @@ def run_lowered_case(
         int(case_cfg.get("ub_size_bytes", 12288)),
         int(case_cfg.get("dma_bytes", 4096)),
         int(case_cfg.get("mask_pattern", 0)),
+        int(case_cfg.get("extract", 0)),
     )
     work_case = tmp_dir / f"{case_cfg['name']}.case.json"
     write_json(work_case, local_case)
@@ -856,6 +918,7 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 f"OP = {case_cfg.get('op', 'vadd')!r}",
                 f"MODE = {case_cfg.get('mode', 'x')!r}",
                 f"PART = {int(case_cfg.get('part', 0))!r}",
+                f"EXTRACT = {int(case_cfg.get('extract', 0))!r}",
                 f"MASK_PATTERN = {int(case_cfg.get('mask_pattern', 0))!r}",
                 f"STORE_MASK_PATTERN = {int(case_cfg.get('store_mask_pattern', case_cfg.get('mask_pattern', 0)))!r}",
                 "SCALAR = 2.0 if OP != 'vdups' else 3.5",
@@ -898,6 +961,9 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "        return np.exp(x - y)",
                 "    if OP == 'vcadd':",
                 "        return x",
+                "    if OP == 'vmull':",
+                "        src = x if EXTRACT == 0 else y",
+                "        return src * src",
                 "    if OP == 'vadds':",
                 "        return x + np.float32(SCALAR)",
                 "    if OP == 'vmuls':",
@@ -984,6 +1050,7 @@ def oracle_key(case_cfg: dict[str, Any]) -> str:
         ("op", case_cfg.get("op", "vadd")),
         ("mode", case_cfg.get("mode", "x")),
         ("part", case_cfg.get("part") if case_cfg.get("op") == "vexpdif" else None),
+        ("extract", case_cfg.get("extract") if case_cfg.get("op") == "vmull" else None),
         ("mask", case_cfg.get("mask_pattern", 0)),
         ("store_mask", case_cfg.get("store_mask_pattern", case_cfg.get("mask_pattern", 0))),
         ("n", case_cfg.get("n_elements")),

@@ -98,6 +98,11 @@ SUITE_OP_INTRINSICS = {
     "vsel": "@llvm.hivm.vsel.v64f32",
     "vexpdif": "@llvm.hivm.vexpdif.v64f32",
     "vcadd": "@llvm.hivm.vcadd.s.x.v64f32",
+    "vmull": {
+        "m": "@llvm.hivm.vmull.s.m.v64f32",
+        "x": "@llvm.hivm.vmull.s.x.v64f32",
+        "z": "@llvm.hivm.vmull.s.z.v64f32",
+    },
 }
 
 
