@@ -575,6 +575,8 @@ class DavVAddSim:
         self.flags: set[tuple[int, int, int]] = set()
         self.dma_bytes = int(case.get("dma_bytes", VECTOR_BYTES_V64F32))
         self.vms4_sr = 0
+        self.loop3_para: int | None = None
+        self.channel_para: int | None = None
 
     def _build_pointer_bindings(self) -> dict[str, str]:
         explicit = self.case.get("arguments", {})
@@ -1084,6 +1086,26 @@ class DavVAddSim:
 
         if name == "@llvm.hivm.SET.CTRL":
             self.trace.append(f"SET.CTRL({args[0].value})")
+            return
+
+        if name == "@llvm.hivm.SET.LOOP3.PARA":
+            if len(args) != 1:
+                raise SimError(f"{name}: expected 1 arg, got {len(args)}")
+            value = self._as_int(args[0], "SET.LOOP3.PARA value")
+            if value != 1:
+                raise SimError("SET.LOOP3.PARA milestone supports value=1 only")
+            self.loop3_para = value
+            self.trace.append(f"SET.LOOP3.PARA({value})")
+            return
+
+        if name == "@llvm.hivm.SET.CHANNEL.PARA":
+            if len(args) != 1:
+                raise SimError(f"{name}: expected 1 arg, got {len(args)}")
+            value = self._as_int(args[0], "SET.CHANNEL.PARA value")
+            if value != 0:
+                raise SimError("SET.CHANNEL.PARA milestone supports value=0 only")
+            self.channel_para = value
+            self.trace.append(f"SET.CHANNEL.PARA({value})")
             return
 
         if name == "@llvm.hivm.sprclr":

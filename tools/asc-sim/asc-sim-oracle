@@ -128,8 +128,10 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.GET.CTRL",
     "@llvm.hivm.SBITSET0",
     "@llvm.hivm.SBITSET1",
+    "@llvm.hivm.SET.CHANNEL.PARA",
     "@llvm.hivm.SET.CTRL",
     "@llvm.hivm.SET.FLAG.IMM",
+    "@llvm.hivm.SET.LOOP3.PARA",
     "@llvm.hivm.WAIT.FLAG.IMM",
     "@llvm.hivm.BARRIER",
     "@llvm.hivm.GET.VMS4.SR",
@@ -896,6 +898,24 @@ def patch_mask_patterns(ir_text: str, case_cfg: dict[str, Any]) -> str:
 
 
 def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
+    if generated == "a5_control_params_u32_8":
+        data = [0x12345678, 0, 0xFFFFFFFF, 0x80000000, 17, 23, 0xCAFEBABE, 0x0BADF00D]
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_control_params",
+                "arguments": {"%input": "input", "%output": "output"},
+                "buffers": {
+                    "input": {"space": "gm", "dtype": "u32", "values": data},
+                    "output": {"space": "gm", "dtype": "u32", "size": 8},
+                },
+                "ub_dtypes": ["u32"],
+                "ub_size_bytes": 32,
+                "dma_bytes": 32,
+                "checks": [{"buffer": "output", "golden": data, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
     if generated == "a5_pstu_stream_256":
         seed = [0xA5] * 256
 
