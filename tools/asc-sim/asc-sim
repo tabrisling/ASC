@@ -558,16 +558,32 @@ def f32(value: float) -> float:
         return math.copysign(float("inf"), value)
 
 
-def fp8_e4m3_to_f32(value: int | float) -> float:
+def fp8_to_f32(value: int | float, exp_bits: int, mant_bits: int, bias: int) -> float:
     raw = int(value) & 0xFF
     sign = -1.0 if raw & 0x80 else 1.0
-    exponent = (raw >> 3) & 0x0F
-    mantissa = raw & 0x07
+    exponent = (raw >> mant_bits) & ((1 << exp_bits) - 1)
+    mantissa = raw & ((1 << mant_bits) - 1)
     if exponent == 0:
-        magnitude = (mantissa / 8.0) * math.ldexp(1.0, -6)
+        magnitude = (mantissa / float(1 << mant_bits)) * math.ldexp(1.0, 1 - bias)
     else:
-        magnitude = (1.0 + mantissa / 8.0) * math.ldexp(1.0, exponent - 7)
+        magnitude = (1.0 + mantissa / float(1 << mant_bits)) * math.ldexp(1.0, exponent - bias)
     return f32(sign * magnitude)
+
+
+def fp8_e4m3_to_f32(value: int | float) -> float:
+    return fp8_to_f32(value, 4, 3, 7)
+
+
+def fp8_e5m2_to_f32(value: int | float) -> float:
+    return fp8_to_f32(value, 5, 2, 15)
+
+
+def fp8_format_to_f32(value: int | float, fmt: str) -> float:
+    if fmt == "e4m3":
+        return fp8_e4m3_to_f32(value)
+    if fmt == "e5m2":
+        return fp8_e5m2_to_f32(value)
+    raise SimError(f"unsupported FP8 format {fmt}")
 
 
 def e8m0_to_f32(value: int | float) -> float:
@@ -645,8 +661,11 @@ class DavVAddSim:
         self.channel_para: int | None = None
         self.l0a_payload: list[int] | None = None
         self.l0b_payload: list[int] | None = None
+        self.l0a_format: str | None = None
+        self.l0b_format: str | None = None
         self.l0a_scale: list[int] | None = None
         self.l0b_scale: list[int] | None = None
+        self.l1_formats: dict[int, str] = {}
 
     def _build_pointer_bindings(self) -> dict[str, str]:
         explicit = self.case.get("arguments", {})
@@ -1325,7 +1344,10 @@ class DavVAddSim:
             )
             return
 
-        if name == "@llvm.hivm.MOV.OUT.TO.L1.ALIGN.V2.e4m3.DV":
+        if name in (
+            "@llvm.hivm.MOV.OUT.TO.L1.ALIGN.V2.e4m3.DV",
+            "@llvm.hivm.MOV.OUT.TO.L1.ALIGN.V2.e5m2.DV",
+        ):
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
             descriptor = self._as_int(args[2], "MOV.OUT.TO.L1 descriptor")
@@ -1338,9 +1360,11 @@ class DavVAddSim:
             src, src_base = self._resolve_pointer(args[1], "gm")
             dst, dst_base = self._resolve_pointer(args[0], "l1", preferred_dtype="u8")
             if src.dtype != "u8" or dst.dtype != "u8":
-                raise SimError(f"{name}: expected u8/e4m3 byte buffers, got {src.dtype}->{dst.dtype}")
+                raise SimError(f"{name}: expected u8 FP8 byte buffers, got {src.dtype}->{dst.dtype}")
             byte_count = byte_count_by_descriptor[descriptor]
             self._copy_typed(src, src_base, dst, dst_base, byte_count, "MOV.OUT.TO.L1")
+            if byte_count == 1024:
+                self.l1_formats[dst_base] = "e5m2" if ".e5m2." in name else "e4m3"
             self.trace.append(
                 f"MOV.OUT.TO.L1 {src.name}[0:{byte_count}] -> "
                 f"L1[{dst_base}:{dst_base + byte_count}]"
@@ -1365,8 +1389,10 @@ class DavVAddSim:
             self._write_buffer_bytes(dst, dst_base, payload, name + " write")
             if expected[3] == "l0a":
                 self.l0a_payload = payload
+                self.l0a_format = self.l1_formats.get(src_base, "e4m3")
             else:
                 self.l0b_payload = payload
+                self.l0b_format = self.l1_formats.get(src_base, "e4m3")
             self.trace.append(f"{name.rsplit('.', 2)[-2]} L1[{src_base}:{src_base + 1024}] -> {expected[3].upper()}")
             return
 
@@ -1387,7 +1413,12 @@ class DavVAddSim:
             self.trace.append(f"{name.rsplit('.', 3)[-3]} scale L1[{src_base}:{src_base + 64}]")
             return
 
-        if name == "@llvm.hivm.MMAD.MX.e4m3e4m3":
+        if name in (
+            "@llvm.hivm.MMAD.MX.e4m3e4m3",
+            "@llvm.hivm.MMAD.MX.e4m3e5m2",
+            "@llvm.hivm.MMAD.MX.e5m2e4m3",
+            "@llvm.hivm.MMAD.MX.e5m2e5m2",
+        ):
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
             config = self._as_int(args[3], "MMAD.MX config")
@@ -1397,12 +1428,22 @@ class DavVAddSim:
                 raise SimError("MMAD.MX requires L0A/L0B payloads")
             if self.l0a_scale is None or self.l0b_scale is None:
                 raise SimError("MMAD.MX requires L0A/L0B MX scales")
+            formats = {
+                "@llvm.hivm.MMAD.MX.e4m3e4m3": ("e4m3", "e4m3"),
+                "@llvm.hivm.MMAD.MX.e4m3e5m2": ("e4m3", "e5m2"),
+                "@llvm.hivm.MMAD.MX.e5m2e4m3": ("e5m2", "e4m3"),
+                "@llvm.hivm.MMAD.MX.e5m2e5m2": ("e5m2", "e5m2"),
+            }[name]
+            if self.l0a_format is not None and self.l0a_format != formats[0]:
+                raise SimError(f"{name}: L0A format {self.l0a_format} does not match {formats[0]}")
+            if self.l0b_format is not None and self.l0b_format != formats[1]:
+                raise SimError(f"{name}: L0B format {self.l0b_format} does not match {formats[1]}")
             dst, dst_base = self._resolve_pointer(args[0], "l0c", preferred_dtype="f32")
             if dst.dtype != "f32":
                 raise SimError(f"{name}: expected f32 L0C buffer, got {dst.dtype}")
             start = self._check_region(dst, dst_base, 16 * 16 * F32_BYTES, "MMAD.MX L0C")
-            a_values = [fp8_e4m3_to_f32(x) for x in self.l0a_payload[: 16 * 64]]
-            b_values = [fp8_e4m3_to_f32(x) for x in self.l0b_payload[: 64 * 16]]
+            a_values = [fp8_format_to_f32(x, formats[0]) for x in self.l0a_payload[: 16 * 64]]
+            b_values = [fp8_format_to_f32(x, formats[1]) for x in self.l0b_payload[: 64 * 16]]
             a_scale = [e8m0_to_f32(x) for x in self.l0a_scale[:32]]
             b_scale_raw = [e8m0_to_f32(x) for x in self.l0b_scale[:32]]
             result = [0.0] * (16 * 16)
@@ -1419,7 +1460,7 @@ class DavVAddSim:
                             acc = f32(acc + f32(a * b))
                     result[m * 16 + n] = f32(acc)
             dst.values[start : start + len(result)] = result
-            self.trace.append("MMAD.MX.e4m3e4m3(16x16x64)")
+            self.trace.append(f"MMAD.MX.{formats[0]}{formats[1]}(16x16x64)")
             return
 
         if name == "@llvm.hivm.FIX.L0C.TO.OUT.f32.EXT":

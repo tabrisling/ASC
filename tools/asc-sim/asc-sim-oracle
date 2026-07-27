@@ -146,11 +146,15 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f16.DV",
     "@llvm.hivm.MOV.OUT.TO.L1.ALIGN.V2.e4m3.DV",
+    "@llvm.hivm.MOV.OUT.TO.L1.ALIGN.V2.e5m2.DV",
     "@llvm.hivm.LOAD.L1.TO.L0A.2Dv2.s8",
     "@llvm.hivm.LOAD.L1.TO.L0A.MX.2Dv2.v",
     "@llvm.hivm.LOAD.L1.TO.L0B.2Dv2.s8",
     "@llvm.hivm.LOAD.L1.TO.L0B.MX.2Dv2.v",
     "@llvm.hivm.MMAD.MX.e4m3e4m3",
+    "@llvm.hivm.MMAD.MX.e4m3e5m2",
+    "@llvm.hivm.MMAD.MX.e5m2e4m3",
+    "@llvm.hivm.MMAD.MX.e5m2e5m2",
     "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
     "@llvm.hivm.init.vector.align.data",
     "@llvm.hivm.mem.bar.vv.all",
@@ -960,6 +964,91 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
         case_json.update(
             {
                 "entry": "dav_mx_mad_e4m3",
+                "arguments": {
+                    "%a": "a",
+                    "%b": "b",
+                    "%a_scale": "a_scale",
+                    "%b_scale": "b_scale",
+                    "%c": "c",
+                },
+                "buffers": {
+                    "a": {"space": "gm", "dtype": "u8", "values": a},
+                    "b": {"space": "gm", "dtype": "u8", "values": b},
+                    "a_scale": {"space": "gm", "dtype": "u8", "values": a_scale},
+                    "b_scale": {"space": "gm", "dtype": "u8", "values": b_scale},
+                    "c": {"space": "gm", "dtype": "f32", "size": 256},
+                },
+                "l1_size_bytes": 4096,
+                "l0a_size_bytes": 2048,
+                "l0b_size_bytes": 2048,
+                "l0c_size_bytes": 1024,
+                "checks": [{"buffer": "c", "golden": golden, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
+    if generated in (
+        "a5_mx_mad_e4m3e5m2_16x16",
+        "a5_mx_mad_e5m2e4m3_16x16",
+        "a5_mx_mad_e5m2e5m2_16x16",
+    ):
+        m_dim = 16
+        n_dim = 16
+        k_dim = 64
+        formats_by_case = {
+            "a5_mx_mad_e4m3e5m2_16x16": ("e4m3", "e5m2", "dav_mx_mad_e4m3e5m2"),
+            "a5_mx_mad_e5m2e4m3_16x16": ("e5m2", "e4m3", "dav_mx_mad_e5m2e4m3"),
+            "a5_mx_mad_e5m2e5m2_16x16": ("e5m2", "e5m2", "dav_mx_mad_e5m2e5m2"),
+        }
+        a_format, b_format, entry = formats_by_case[generated]
+
+        def fp8_to_f32(value: int, exp_bits: int, mant_bits: int, bias: int) -> float:
+            raw = value & 0xFF
+            sign = -1.0 if raw & 0x80 else 1.0
+            exponent = (raw >> mant_bits) & ((1 << exp_bits) - 1)
+            mantissa = raw & ((1 << mant_bits) - 1)
+            if exponent == 0:
+                magnitude = (mantissa / float(1 << mant_bits)) * math.ldexp(1.0, 1 - bias)
+            else:
+                magnitude = (1.0 + mantissa / float(1 << mant_bits)) * math.ldexp(1.0, exponent - bias)
+            return f32(sign * magnitude)
+
+        def decode(value: int, fmt: str) -> float:
+            if fmt == "e4m3":
+                return fp8_to_f32(value, 4, 3, 7)
+            if fmt == "e5m2":
+                return fp8_to_f32(value, 5, 2, 15)
+            raise ValueError(fmt)
+
+        def e8m0_to_f32(value: int) -> float:
+            return f32(math.ldexp(1.0, (value & 0xFF) - 127))
+
+        a_value = 0x30 if a_format == "e4m3" else 0x3C
+        b_value = 0x30 if b_format == "e4m3" else 0x3C
+        a = [a_value] * (m_dim * k_dim)
+        b = [b_value] * (k_dim * n_dim)
+        a_scale = [127] * 64
+        b_scale = [127] * 64
+        a_values = [decode(value, a_format) for value in a]
+        b_values = [decode(value, b_format) for value in b]
+        a_scale_values = [e8m0_to_f32(value) for value in a_scale[:32]]
+        b_scale_values = [e8m0_to_f32(value) for value in b_scale[:32]]
+        golden: list[float] = []
+        for m in range(m_dim):
+            for n in range(n_dim):
+                acc = 0.0
+                for group in range(k_dim // 32):
+                    a_s = a_scale_values[m * 2 + group]
+                    b_s = b_scale_values[n * 2 + group]
+                    for k_inner in range(32):
+                        k = group * 32 + k_inner
+                        lhs = f32(a_values[m * k_dim + k] * a_s)
+                        rhs = f32(b_values[k * n_dim + n] * b_s)
+                        acc = f32(acc + f32(lhs * rhs))
+                golden.append(f32(acc))
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": entry,
                 "arguments": {
                     "%a": "a",
                     "%b": "b",
