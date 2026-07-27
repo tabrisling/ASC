@@ -1540,6 +1540,72 @@
       "expect_asc_status": "error"
     },
     {
+      "name": "direct_ir_p1_vmull_f16_unsupported",
+      "ir": "unsupported/p1_vmull_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vmull.s.m.v128f16",
+        "@llvm.hivm.vmull.s.x.v128f16",
+        "@llvm.hivm.vmull.s.z.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_p1_vpack_float_unsupported",
+      "ir": "unsupported/p1_vpack_float.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vpack.x.v64f32",
+        "@llvm.hivm.vpack.x.v128f16",
+        "@llvm.hivm.vpack.x.v128bf16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_p1_gather_scatter_float_unsupported",
+      "ir": "unsupported/p1_gather_scatter_float.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vgather.v64f32",
+        "@llvm.hivm.vgather.v128f16",
+        "@llvm.hivm.vgather.v128bf16",
+        "@llvm.hivm.vscatter.v64f32",
+        "@llvm.hivm.vscatter.v128f16",
+        "@llvm.hivm.vscatter.v128bf16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
       "name": "gm_ub_register_vmull_low_64",
       "ir": "../vadd.ll",
       "case": "../vadd.case.json",
@@ -3263,6 +3329,69 @@
         "@llvm.hivm.vadds.s.x.v128bf16",
         "@llvm.hivm.vmaxs.s.x.v128bf16",
         "@llvm.hivm.vmins.s.x.v128bf16"
+      ],
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_p1_vmull_f16_simulator_n128",
+      "ir": "unsupported/p1_vmull_f16.ll",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vmull",
+      "suite_op": false,
+      "simulator_dtype": "float16",
+      "simulator_shape": 128,
+      "vector_lanes": 128,
+      "n_elements": 128,
+      "intrinsics": [
+        "@llvm.hivm.vmull.s.m.v128f16",
+        "@llvm.hivm.vmull.s.x.v128f16",
+        "@llvm.hivm.vmull.s.z.v128f16"
+      ],
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_p1_vpack_float_simulator_n128",
+      "ir": "unsupported/p1_vpack_float.ll",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vadd",
+      "suite_op": false,
+      "simulator_dtype": "float16",
+      "simulator_shape": 128,
+      "vector_lanes": 128,
+      "n_elements": 128,
+      "intrinsics": [
+        "@llvm.hivm.vpack.x.v64f32",
+        "@llvm.hivm.vpack.x.v128f16",
+        "@llvm.hivm.vpack.x.v128bf16"
+      ],
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_p1_gather_scatter_float_simulator_n64",
+      "ir": "unsupported/p1_gather_scatter_float.ll",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vadd",
+      "suite_op": false,
+      "simulator_dtype": "float32",
+      "simulator_shape": 64,
+      "vector_lanes": 64,
+      "n_elements": 64,
+      "intrinsics": [
+        "@llvm.hivm.vgather.v64f32",
+        "@llvm.hivm.vgather.v128f16",
+        "@llvm.hivm.vgather.v128bf16",
+        "@llvm.hivm.vscatter.v64f32",
+        "@llvm.hivm.vscatter.v128f16",
+        "@llvm.hivm.vscatter.v128bf16"
       ],
       "expect_simulator_status": "error"
     },
