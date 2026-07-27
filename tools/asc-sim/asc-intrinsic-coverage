@@ -79,6 +79,7 @@ MODEL_SUPPORTED = {
     "@llvm.hivm.vdups.z.v64f32",
     "@llvm.hivm.vdups.z.v64i32",
     "@llvm.hivm.vgatherb.v310.v256s8",
+    "@llvm.hivm.vgatherb.v310.v64s32",
     "@llvm.hivm.vsel.v64f32",
     "@llvm.hivm.vsel.v64i32",
     "@llvm.hivm.vsldb",

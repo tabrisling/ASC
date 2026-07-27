@@ -380,6 +380,26 @@ def round_dtype(value: Any, dtype: str) -> int | float:
     raise SimError(f"unsupported dtype {dtype}")
 
 
+def u32_to_le_bytes(value: int | float) -> list[int]:
+    raw = u32(value)
+    return [(raw >> shift) & 0xFF for shift in (0, 8, 16, 24)]
+
+
+def le_bytes_to_u32(values: list[int]) -> int:
+    if len(values) != I32_BYTES:
+        raise SimError(f"expected {I32_BYTES} bytes for u32 packing, got {len(values)}")
+    raw = 0
+    for idx, value in enumerate(values):
+        raw |= (int(value) & 0xFF) << (idx * 8)
+    return raw
+
+
+def pack_u32_words_from_bytes(values: list[int]) -> list[int]:
+    if len(values) % I32_BYTES != 0:
+        raise SimError("byte payload length is not divisible by 4")
+    return [le_bytes_to_u32(values[idx : idx + I32_BYTES]) for idx in range(0, len(values), I32_BYTES)]
+
+
 def f32(value: float) -> float:
     if math.isnan(value):
         return float("nan")
@@ -577,6 +597,32 @@ class DavVAddSim:
         dst_start = self._check_region(dst, dst_byte_offset, byte_count, op + " write")
         count = byte_count // dtype_bytes(src.dtype)
         dst.values[dst_start : dst_start + count] = src.values[src_start : src_start + count]
+
+    def _read_ub_bytes(self, buf: Buffer, byte_offset: int, byte_count: int, op: str) -> list[int]:
+        if buf.dtype not in ("u8", "s8"):
+            raise SimError(f"{op}: expected byte UB buffer, got {buf.dtype}")
+        start = self._check_region(buf, byte_offset, byte_count, op, alignment=1)
+        return [int(x) & 0xFF for x in buf.values[start : start + byte_count]]
+
+    def _mirror_u32_vector_to_u8_view(
+        self,
+        byte_offset: int,
+        vec: list[int | None],
+        mask: list[bool],
+        op: str,
+    ) -> None:
+        byte_view = self.buffers.get("__ub_u8")
+        if byte_view is None:
+            return
+        start = self._check_region(byte_view, byte_offset, VECTOR_BYTES_V64I32, op, alignment=1)
+        for idx, active in enumerate(mask):
+            if not active:
+                continue
+            value = vec[idx]
+            if value is None:
+                raise SimError(f"{op}: stores inactive/undefined lane {idx}")
+            word_start = start + idx * I32_BYTES
+            byte_view.values[word_start : word_start + I32_BYTES] = u32_to_le_bytes(value)
 
     def run(self) -> None:
         instructions, labels = self._parse_function_body()
@@ -892,17 +938,30 @@ class DavVAddSim:
                 raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
             stride_cfg = self._as_int(args[1], "vsldb stride config")
             offset = self._as_int(args[2], "vsldb offset")
+            if "<64 x i32>" in line:
+                mask = self._as_mask(args[3], "vsldb mask", lanes=LANES_I32_V64)
+                if stride_cfg != 65537 or offset != 0 or not all(mask):
+                    raise SimError("vsldb i32 milestone supports stride_cfg=65537, offset=0, full b32 mask only")
+                payload = self._read_ub_bytes(
+                    buf,
+                    base_byte + MEMORY_BLOCK_BYTES,
+                    VECTOR_BYTES_V64I32,
+                    "vsldb",
+                )
+                self.values[lhs] = pack_u32_words_from_bytes(payload)
+                self.trace.append(f"{lhs} = vsldb.i32(UB, byte_offset={base_byte + MEMORY_BLOCK_BYTES})")
+                return
+            if "<256 x i8>" not in line:
+                raise SimError("vsldb milestone supports <256 x i8> and <64 x i32> results only")
             mask = self._as_mask(args[3], "vsldb mask", lanes=LANES_I8_V256)
             if stride_cfg != 65537 or offset != 0 or not all(mask):
                 raise SimError("vsldb i8 milestone supports stride_cfg=65537, offset=0, full b8 mask only")
-            start = self._check_region(
+            self.values[lhs] = self._read_ub_bytes(
                 buf,
                 base_byte + MEMORY_BLOCK_BYTES,
                 VECTOR_BYTES_V256I8,
                 "vsldb",
-                alignment=1,
             )
-            self.values[lhs] = [int(x) & 0xFF for x in buf.values[start : start + LANES_I8_V256]]
             self.trace.append(f"{lhs} = vsldb.i8(UB, byte_offset={base_byte + MEMORY_BLOCK_BYTES})")
             return
 
@@ -936,6 +995,38 @@ class DavVAddSim:
                 gathered.extend(int(x) & 0xFF for x in buf.values[start : start + MEMORY_BLOCK_BYTES])
             self.values[lhs] = gathered
             self.trace.append(f"{lhs} = vgatherb.i8(UB, byte_offset={base_byte})")
+            return
+
+        if name == "@llvm.hivm.vgatherb.v310.v64s32":
+            if lhs is None:
+                raise SimError("vgatherb result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u8")
+            if buf.dtype not in ("u8", "s8"):
+                raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
+            offsets = self._as_u32_vector(args[1], "vgatherb offsets")
+            mask = self._as_mask(args[2], "vgatherb mask", lanes=LANES_I32_V64)
+            if not all(mask):
+                raise SimError("vgatherb i32 milestone supports full b32 mask only")
+            gathered_bytes: list[int] = []
+            for block_idx in range(MEMORY_BLOCK_COUNT):
+                raw_offset = offsets[block_idx]
+                if raw_offset is None:
+                    raise SimError(f"vgatherb reads inactive offset lane {block_idx}")
+                byte_offset = int(raw_offset)
+                if byte_offset < 0:
+                    raise SimError("vgatherb i32 milestone rejects negative offsets")
+                gathered_bytes.extend(
+                    self._read_ub_bytes(
+                        buf,
+                        base_byte + byte_offset,
+                        MEMORY_BLOCK_BYTES,
+                        "vgatherb",
+                    )
+                )
+            self.values[lhs] = pack_u32_words_from_bytes(gathered_bytes)
+            self.trace.append(f"{lhs} = vgatherb.i32(UB, byte_offset={base_byte})")
             return
 
         if name == "@llvm.hivm.vldsx1.v128f16":
@@ -1267,6 +1358,7 @@ class DavVAddSim:
                 if value is None:
                     raise SimError(f"vstsx1 stores inactive/undefined lane {idx}")
                 buf.values[start + idx] = round_dtype(value, buf.dtype)
+            self._mirror_u32_vector_to_u8_view(base_byte + byte_offset, vec, mask, "vstsx1 byte mirror")
             self.trace.append(f"vstsx1.s32({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
             return
 
