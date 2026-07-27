@@ -117,9 +117,12 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.WAIT.FLAG.IMM",
     "@llvm.hivm.BARRIER",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
+    "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f16.DV",
     "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
     "@llvm.hivm.pset.b32",
+    "@llvm.hivm.vldsx1.v128f16",
     "@llvm.hivm.vldsx1.v64f32",
+    "@llvm.hivm.vstsx1.v128f16",
     "@llvm.hivm.vstsx1.v64f32",
     "@llvm.hivm.vadd.v64f32.x",
     "@llvm.hivm.vadd.s.x.v64f32",
@@ -385,6 +388,15 @@ def f32(value: float) -> float:
         return float("nan")
     try:
         return struct.unpack("f", struct.pack("f", value))[0]
+    except OverflowError:
+        return math.copysign(float("inf"), value)
+
+
+def f16(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    try:
+        return struct.unpack("e", struct.pack("e", value))[0]
     except OverflowError:
         return math.copysign(float("inf"), value)
 
@@ -765,6 +777,24 @@ def patch_mask_patterns(ir_text: str, case_cfg: dict[str, Any]) -> str:
 
 
 def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
+    if generated == "f16_roundtrip_128":
+        values = [f16((idx - 64) / 4.0) for idx in range(128)]
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_f16_roundtrip",
+                "arguments": {"%a": "a", "%out": "out"},
+                "buffers": {
+                    "a": {"space": "gm", "dtype": "f16", "values": values},
+                    "out": {"space": "gm", "dtype": "f16", "size": 128},
+                },
+                "ub_dtype": "f16",
+                "ub_size_bytes": 512,
+                "dma_bytes": 256,
+                "checks": [{"buffer": "out", "golden": values, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
     if generated == "special_f32_64":
         base_a = [
             0.0,

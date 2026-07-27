@@ -129,6 +129,20 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "gm_ub_register_f16_roundtrip_128",
+      "ir": "../f16_roundtrip.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f16.DV",
+        "@llvm.hivm.vldsx1.v128f16",
+        "@llvm.hivm.vstsx1.v128f16"
+      ],
+      "generated": "f16_roundtrip_128",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "direct_ir_vcadd_f16_unsupported",
       "ir": "unsupported/vcadd_f16.ll",
       "case": "../vadd.case.json",
