@@ -92,7 +92,7 @@
       "ir": "../vadd.ll",
       "case": "../vadd.case.json",
       "op": "vrec",
-      "expect_asc_status": "pass"
+      "expect_asc_status": "error"
     },
     {
       "name": "gm_ub_register_vexp_64",
@@ -378,7 +378,7 @@
       "dma_bytes": 4096,
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "pass"
+      "expect_asc_status": "error"
     },
     {
       "name": "opentile_vector_exp_lowered_n64",
@@ -494,6 +494,26 @@
       "expect_simulator_status": "pass"
     },
     {
+      "name": "opentile_vector_add_simulator_n63",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "n_elements": 63,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_add_simulator_n65",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "n_elements": 65,
+      "expect_simulator_status": "pass"
+    },
+    {
       "name": "opentile_vector_sub_simulator_n64",
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "case_dir": "simulator/cases/vector_add",
@@ -602,6 +622,30 @@
       "op": "vdups",
       "n_elements": 64,
       "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_div_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vdiv",
+      "n_elements": 64,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_rec_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vrec",
+      "n_elements": 64,
+      "expect_simulator_status": "error",
+      "error_category": "simulator_instruction_error",
+      "error_signature": "RV_VREC F32 unsupported"
     },
     {
       "name": "opentile_vector_add_simulator_n1023",

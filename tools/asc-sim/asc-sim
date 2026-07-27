@@ -43,7 +43,6 @@ UNARY_VECTOR_OPS = {
     "@llvm.hivm.vneg.x.v64f32": ("vneg", lambda a: f32(-a)),
     "@llvm.hivm.vrelu.x.v64f32": ("vrelu", lambda a: f32(max(a, 0.0))),
     "@llvm.hivm.vsqrt.x.v64f32": ("vsqrt", lambda a: f32_sqrt(a)),
-    "@llvm.hivm.vrec.x.v64f32": ("vrec", lambda a: f32_div(1.0, a)),
     "@llvm.hivm.vexp.x.v64f32": ("vexp", lambda a: f32_exp(a)),
 }
 

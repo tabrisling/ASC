@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""Report OpenTileAS llvm.hivm intrinsic coverage in ASC dav-sim."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+
+MODEL_SUPPORTED = {
+    "@llvm.hivm.GET.BLOCK.IDX",
+    "@llvm.hivm.GET.CTRL",
+    "@llvm.hivm.SBITSET0",
+    "@llvm.hivm.SBITSET1",
+    "@llvm.hivm.SET.CTRL",
+    "@llvm.hivm.SET.FLAG.IMM",
+    "@llvm.hivm.WAIT.FLAG.IMM",
+    "@llvm.hivm.BARRIER",
+    "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
+    "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+    "@llvm.hivm.pset.b32",
+    "@llvm.hivm.vldsx1.v64f32",
+    "@llvm.hivm.vstsx1.v64f32",
+    "@llvm.hivm.vadd.v64f32.x",
+    "@llvm.hivm.vadd.s.x.v64f32",
+    "@llvm.hivm.vsub.s.x.v64f32",
+    "@llvm.hivm.vmul.s.x.v64f32",
+    "@llvm.hivm.vdiv.s.x.v64f32",
+    "@llvm.hivm.vmax.s.x.v64f32",
+    "@llvm.hivm.vmin.s.x.v64f32",
+    "@llvm.hivm.vabs.x.v64f32",
+    "@llvm.hivm.vneg.x.v64f32",
+    "@llvm.hivm.vrelu.x.v64f32",
+    "@llvm.hivm.vsqrt.x.v64f32",
+    "@llvm.hivm.vexp.x.v64f32",
+    "@llvm.hivm.vadds.s.x.v64f32",
+    "@llvm.hivm.vmuls.s.x.v64f32",
+    "@llvm.hivm.vmaxs.s.x.v64f32",
+    "@llvm.hivm.vmins.s.x.v64f32",
+    "@llvm.hivm.vdups.z.v64f32",
+}
+
+SUITE_OP_INTRINSICS = {
+    "vadd": "@llvm.hivm.vadd.s.x.v64f32",
+    "vsub": "@llvm.hivm.vsub.s.x.v64f32",
+    "vmul": "@llvm.hivm.vmul.s.x.v64f32",
+    "vdiv": "@llvm.hivm.vdiv.s.x.v64f32",
+    "vmax": "@llvm.hivm.vmax.s.x.v64f32",
+    "vmin": "@llvm.hivm.vmin.s.x.v64f32",
+    "vabs": "@llvm.hivm.vabs.x.v64f32",
+    "vneg": "@llvm.hivm.vneg.x.v64f32",
+    "vrelu": "@llvm.hivm.vrelu.x.v64f32",
+    "vsqrt": "@llvm.hivm.vsqrt.x.v64f32",
+    "vrec": "@llvm.hivm.vrec.x.v64f32",
+    "vexp": "@llvm.hivm.vexp.x.v64f32",
+    "vadds": "@llvm.hivm.vadds.s.x.v64f32",
+    "vmuls": "@llvm.hivm.vmuls.s.x.v64f32",
+    "vmaxs": "@llvm.hivm.vmaxs.s.x.v64f32",
+    "vmins": "@llvm.hivm.vmins.s.x.v64f32",
+    "vdups": "@llvm.hivm.vdups.z.v64f32",
+}
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def intrinsic_sources(opentileas_repo: Path) -> list[Path]:
+    candidates = [
+        opentileas_repo / "include" / "Dialect" / "CCE" / "IR" / "CCEIntrinsicMap.td",
+        opentileas_repo / "include" / "Target" / "Npu" / "IntrinsicsNPU.td",
+    ]
+    return [path for path in candidates if path.is_file()]
+
+
+def discover_intrinsics(opentileas_repo: Path) -> dict[str, dict[str, Any]]:
+    inventory: dict[str, dict[str, Any]] = {}
+    for path in intrinsic_sources(opentileas_repo):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for match in re.finditer(r'"(llvm\.hivm\.[^"]+)"', text):
+            name = "@" + match.group(1)
+            entry = inventory.setdefault(
+                name,
+                {
+                    "intrinsic": name,
+                    "category": categorize(name),
+                    "priority": priority(name),
+                    "sources": [],
+                    "model": "supported" if name in MODEL_SUPPORTED else "unsupported",
+                    "suite": "missing",
+                },
+            )
+            rel = str(path.relative_to(opentileas_repo))
+            if rel not in entry["sources"]:
+                entry["sources"].append(rel)
+    return inventory
+
+
+def categorize(name: str) -> str:
+    lowered = name.lower()
+    if any(token in lowered for token in ("mov.", "get.buf", "rls.buf")):
+        return "dma"
+    if any(token in lowered for token in ("flag", "barrier", "mem.bar", "sbitset", "ctrl")):
+        return "sync"
+    if any(token in lowered for token in ("vlds", "vldu", "vsts", "vstus", "vstas")):
+        return "load-store"
+    if any(token in lowered for token in ("vcvt", "vtrc")):
+        return "convert"
+    if "gather" in lowered or "scatter" in lowered:
+        return "gather-scatter"
+    if "vsel" in lowered or "cmp" in lowered or "pintlv" in lowered or "pmov" in lowered:
+        return "predicate-select"
+    if "vcadd" in lowered or "vcmax" in lowered or "vcmin" in lowered:
+        return "reduction"
+    if any(token in lowered for token in ("vadds", "vmuls", "vmaxs", "vmins")):
+        return "scalar-vector"
+    if any(token in lowered for token in ("vabs", "vneg", "vsqrt", "vrsqrt", "vrec", "vexp", "vln", "vrelu", "vnot")):
+        return "unary"
+    if any(token in lowered for token in ("vadd", "vsub", "vmul", "vdiv", "vmax", "vmin", "vand")):
+        return "binary"
+    if "vdups" in lowered or "vbr" in lowered:
+        return "broadcast"
+    return "unknown"
+
+
+def priority(name: str) -> str:
+    lowered = name.lower()
+    if ".v64f32" in lowered and any(
+        token in lowered
+        for token in (
+            "vadd",
+            "vsub",
+            "vmul",
+            "vdiv",
+            "vmax",
+            "vmin",
+            "vabs",
+            "vneg",
+            "vsqrt",
+            "vrec",
+            "vexp",
+            "vdups",
+            "vadds",
+            "vmuls",
+            "vmaxs",
+            "vmins",
+            "vcadd",
+            "vsel",
+        )
+    ):
+        return "P0"
+    if ".v64f32" in lowered or ".v128f16" in lowered or ".v128bf16" in lowered:
+        return "P1"
+    return "P2"
+
+
+def suite_intrinsics(suite: dict[str, Any]) -> set[str]:
+    covered: set[str] = set()
+    for section in ("asc_cases", "lowered_cases", "simulator_cases"):
+        for case in suite.get(section, []):
+            op = case.get("op", "vadd")
+            if op in SUITE_OP_INTRINSICS:
+                covered.add(SUITE_OP_INTRINSICS[op])
+    return covered
+
+
+def report(inventory: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    items = sorted(inventory.values(), key=lambda item: (item["priority"], item["category"], item["intrinsic"]))
+    summary: dict[str, Any] = {
+        "total": len(items),
+        "supported": sum(1 for item in items if item["model"] == "supported"),
+        "unsupported": sum(1 for item in items if item["model"] != "supported"),
+        "by_priority": {},
+        "by_category": {},
+    }
+    for item in items:
+        summary["by_priority"][item["priority"]] = summary["by_priority"].get(item["priority"], 0) + 1
+        summary["by_category"][item["category"]] = summary["by_category"].get(item["category"], 0) + 1
+    return {"summary": summary, "intrinsics": items}
+
+
+def main(argv: list[str]) -> int:
+    root = repo_root()
+    default_suite = root / "examples" / "davsim" / "vadd" / "oracle" / "vadd_oracle_suite.json"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--opentileas-repo", type=Path, default=root.parent / "OpenTileAS")
+    parser.add_argument("--suite", type=Path, default=default_suite)
+    parser.add_argument("--json", type=Path, help="write full JSON report")
+    parser.add_argument("--fail-on-p0-unsupported", action="store_true")
+    args = parser.parse_args(argv)
+
+    inventory = discover_intrinsics(args.opentileas_repo.resolve())
+    suite = load_json(args.suite.resolve())
+    covered = suite_intrinsics(suite)
+    for name in covered:
+        if name in inventory:
+            inventory[name]["suite"] = "covered"
+    data = report(inventory)
+    summary = data["summary"]
+    print(
+        "intrinsic coverage: "
+        f"{summary['supported']}/{summary['total']} model-supported, "
+        f"{summary['unsupported']} unsupported"
+    )
+    print(f"by priority: {summary['by_priority']}")
+    print(f"by category: {summary['by_category']}")
+    p0_missing = [
+        item for item in data["intrinsics"]
+        if item["priority"] == "P0" and item["model"] != "supported"
+    ]
+    if p0_missing:
+        print("[P0 unsupported]")
+        for item in p0_missing[:80]:
+            print(f"  {item['intrinsic']} ({item['category']})")
+        if len(p0_missing) > 80:
+            print(f"  ... {len(p0_missing) - 80} more")
+    if args.json:
+        args.json.resolve().write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return 1 if args.fail_on_p0_unsupported and p0_missing else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

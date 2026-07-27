@@ -473,17 +473,31 @@ def run_simulator_case(
 ) -> dict[str, Any]:
     script = opentileas_repo / "simulator" / "scripts" / "ascend_simu.py"
     run_id = safe_slug(f"asc-oracle-{case_cfg['name']}-{int(time.time())}")
-    case_dir = materialize_simulator_case(case_cfg, opentileas_repo, tmp_dir)
-    source_flag = "--mlir"
-    source_path = opentileas_repo / case_cfg["mlir"]
-    if case_cfg.get("op", "vadd") != "vadd":
-        source_path, _ = materialize_lowered_ir(
-            case_cfg,
-            opentileas_repo,
-            build_dir,
-            tmp_dir / f"sim-ir-{case_cfg['name']}",
-        )
-        source_flag = "--llvm-ir"
+    expected = case_cfg.get("expect_simulator_status", "pass")
+    try:
+        case_dir = materialize_simulator_case(case_cfg, opentileas_repo, tmp_dir)
+        source_flag = "--mlir"
+        source_path = opentileas_repo / case_cfg["mlir"]
+        if case_cfg.get("op", "vadd") != "vadd":
+            source_path, _ = materialize_lowered_ir(
+                case_cfg,
+                opentileas_repo,
+                build_dir,
+                tmp_dir / f"sim-ir-{case_cfg['name']}",
+            )
+            source_flag = "--llvm-ir"
+    except Exception as exc:
+        return {
+            "name": case_cfg["name"],
+            "kind": "simulator-oracle",
+            "status": "error",
+            "expected": expected,
+            "ok": expected == "error",
+            "returncode": None,
+            "local_run": None,
+            "stderr_tail": f"materialize-error: {exc}",
+            "stdout_tail": "",
+        }
     cmd = [
         sys.executable,
         str(script),
@@ -513,7 +527,6 @@ def run_simulator_case(
     ]
     result = run_command(cmd)
     status = "pass" if result.returncode == 0 else "error"
-    expected = case_cfg.get("expect_simulator_status", "pass")
     return {
         "name": case_cfg["name"],
         "kind": "simulator-oracle",
@@ -557,6 +570,8 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "        return x - y",
                 "    if OP == 'vmul':",
                 "        return x * y",
+                "    if OP == 'vdiv':",
+                "        return x / y",
                 "    if OP == 'vmax':",
                 "        return np.maximum(x, y)",
                 "    if OP == 'vmin':",
@@ -630,6 +645,42 @@ def print_report(results: list[dict[str, Any]]) -> None:
     print(f"summary: {len(results) - len(failures)}/{len(results)} checks passed")
 
 
+def oracle_key(case_cfg: dict[str, Any]) -> str:
+    if case_cfg.get("kernel_id"):
+        return str(case_cfg["kernel_id"])
+    fields = [
+        ("source", case_cfg.get("mlir") or case_cfg.get("ir")),
+        ("op", case_cfg.get("op", "vadd")),
+        ("n", case_cfg.get("n_elements")),
+        ("alloc", case_cfg.get("allocated_elements", 1024)),
+        ("ub", case_cfg.get("ub_size_bytes", 12288)),
+        ("dma", case_cfg.get("dma_bytes", 4096)),
+        ("target", case_cfg.get("target", "dav-351x")),
+        ("core", case_cfg.get("core", "vec")),
+        ("fusion", case_cfg.get("fusion_mode", "no_fuse")),
+    ]
+    return "|".join(f"{name}={value}" for name, value in fields if value not in (None, ""))
+
+
+def check_simulator_coverage(suite: dict[str, Any], run_simulator: bool) -> list[str]:
+    simulator_keys = {oracle_key(case) for case in suite.get("simulator_cases", [])}
+    gaps: list[str] = []
+    for case in suite.get("lowered_cases", []):
+        if case.get("expect_asc_status", "pass") != "pass":
+            continue
+        if not case.get("require_simulator", True):
+            continue
+        key = oracle_key(case)
+        if key not in simulator_keys:
+            gaps.append(
+                f"{case['name']}: ASC pass case has no simulator oracle "
+                f"for kernel key {key!r}"
+            )
+    if gaps and not run_simulator:
+        gaps.append("run with --run-simulator to execute configured simulator oracle cases")
+    return gaps
+
+
 def main(argv: list[str]) -> int:
     root = repo_root()
     default_suite = root / "examples" / "davsim" / "vadd" / "oracle" / "vadd_oracle_suite.json"
@@ -645,6 +696,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--developer", default=os.environ.get("USER", "developer"))
     parser.add_argument("--launcher", default="/usr/local/sbin/opentileas-simu-exec")
     parser.add_argument("--report", type=Path)
+    parser.add_argument(
+        "--enforce-simulator-coverage",
+        action="store_true",
+        help="fail if an ASC-pass lowered case lacks a matching simulator oracle case",
+    )
     args = parser.parse_args(argv)
 
     suite_path = args.suite.resolve()
@@ -685,9 +741,14 @@ def main(argv: list[str]) -> int:
                 )
 
     print_report(results)
+    coverage_gaps = check_simulator_coverage(suite, args.run_simulator)
+    if args.enforce_simulator_coverage and coverage_gaps:
+        print("[simulator-coverage]")
+        for gap in coverage_gaps:
+            print(f"  {gap}")
     if args.report:
-        write_json(args.report.resolve(), {"results": results})
-    return 0 if all(item["ok"] for item in results) else 1
+        write_json(args.report.resolve(), {"results": results, "coverage_gaps": coverage_gaps})
+    return 0 if all(item["ok"] for item in results) and not (args.enforce_simulator_coverage and coverage_gaps) else 1
 
 
 if __name__ == "__main__":
