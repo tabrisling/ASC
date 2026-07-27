@@ -116,6 +116,7 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.SET.FLAG.IMM",
     "@llvm.hivm.WAIT.FLAG.IMM",
     "@llvm.hivm.BARRIER",
+    "@llvm.hivm.sprclr",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
@@ -196,8 +197,13 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vsel.v64f32",
     "@llvm.hivm.vsel.v64i32",
     "@llvm.hivm.vsldb",
+    "@llvm.hivm.vsqz.x.v64f32",
+    "@llvm.hivm.vsqz.x.v64i32",
     "@llvm.hivm.vsubc.v64u32",
     "@llvm.hivm.vsubcs.v64u32",
+    "@llvm.hivm.vstar",
+    "@llvm.hivm.vstur",
+    "@llvm.hivm.vstus",
     "@llvm.hivm.vexpdif.v64f32",
     "@llvm.hivm.vcadd.s.x.v64f32",
     "@llvm.hivm.vcmax.s.x.v64f32",
@@ -1300,6 +1306,46 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
                 "ub_size_bytes": 4608,
                 "dma_bytes": 1024,
                 "checks": [{"buffer": "out", "golden": golden, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
+    if generated in ("a5_stateful_store_f32_512", "a5_stateful_store_i32_512"):
+        if generated == "a5_stateful_store_f32_512":
+            entry = "dav_stateful_store_f32"
+            data = [((idx * 73 + 19) % 251) for idx in range(256)]
+            active_bytes = 17 * 4
+            ub_dtypes = ["u8", "f32"]
+        else:
+            entry = "dav_stateful_store_i32"
+            data = [((idx * 31 + 47) % 251) for idx in range(256)]
+            active_bytes = 19 * 4
+            ub_dtypes = ["u8", "u32"]
+        seed_vstus = [0xA5] * 256
+        seed_vstur = [0x5A] * 256
+        first = list(seed_vstus)
+        second = list(seed_vstur)
+        first[:active_bytes] = data[:active_bytes]
+        second[:active_bytes] = data[:active_bytes]
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": entry,
+                "arguments": {
+                    "%data": "data",
+                    "%seed_vstus": "seed_vstus",
+                    "%seed_vstur": "seed_vstur",
+                    "%out": "out",
+                },
+                "buffers": {
+                    "data": {"space": "gm", "dtype": "u8", "values": data},
+                    "seed_vstus": {"space": "gm", "dtype": "u8", "values": seed_vstus},
+                    "seed_vstur": {"space": "gm", "dtype": "u8", "values": seed_vstur},
+                    "out": {"space": "gm", "dtype": "u8", "size": 512},
+                },
+                "ub_dtypes": ub_dtypes,
+                "ub_size_bytes": 1024,
+                "dma_bytes": 256,
+                "checks": [{"buffer": "out", "golden": first + second, "atol": 0, "rtol": 0}],
             }
         )
         return
