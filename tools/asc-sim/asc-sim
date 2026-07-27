@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+"""Minimal dav LLVM intrinsic functional simulator.
+
+This is intentionally narrow: the first milestone supports a single vector add
+pipeline built from pset, vldsx1, vadd, and vstsx1. It is a fast local preflight
+tool for OpenTileAS-produced LLVM IR, not a cycle-accurate hardware simulator.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+LANES_F32_V64 = 64
+F32_BYTES = 4
+VECTOR_BYTES_V64F32 = LANES_F32_V64 * F32_BYTES
+UB_ADDRSPACE = 6
+ALIGNMENT_BYTES = 32
+
+
+class SimError(RuntimeError):
+    pass
+
+
+@dataclass
+class Buffer:
+    name: str
+    values: list[float]
+    dtype: str = "f32"
+    space: str = "ub"
+
+
+@dataclass
+class TypedValue:
+    value: str | int
+    addrspace: int | None = None
+
+
+def strip_comment(line: str) -> str:
+    return line.split(";", 1)[0].strip()
+
+
+def split_args(arg_text: str) -> list[str]:
+    args: list[str] = []
+    cur: list[str] = []
+    depth_angle = 0
+    depth_paren = 0
+    for ch in arg_text:
+        if ch == "<":
+            depth_angle += 1
+        elif ch == ">":
+            depth_angle -= 1
+        elif ch == "(":
+            depth_paren += 1
+        elif ch == ")":
+            depth_paren -= 1
+        elif ch == "," and depth_angle == 0 and depth_paren == 0:
+            args.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    if cur:
+        args.append("".join(cur).strip())
+    return args
+
+
+def parse_typed_value(text: str) -> TypedValue:
+    text = text.strip()
+    addrspace = None
+    m_space = re.search(r"addrspace\((\d+)\)", text)
+    if m_space:
+        addrspace = int(m_space.group(1))
+
+    m_symbol = re.search(r"(%[-A-Za-z0-9_.$]+)\s*$", text)
+    if m_symbol:
+        return TypedValue(m_symbol.group(1), addrspace)
+
+    m_int = re.search(r"(-?\d+)\s*$", text)
+    if m_int:
+        return TypedValue(int(m_int.group(1)), addrspace)
+
+    raise SimError(f"cannot parse typed LLVM operand: {text!r}")
+
+
+def parse_function_args(ir: str, entry: str) -> dict[str, int | None]:
+    m = re.search(rf"define\s+.*?@{re.escape(entry)}\s*\((.*?)\)\s*\{{", ir, re.S)
+    if not m:
+        raise SimError(f"entry function @{entry} not found")
+    args: dict[str, int | None] = {}
+    for arg in split_args(m.group(1)):
+        tv = parse_typed_value(arg)
+        if not isinstance(tv.value, str):
+            continue
+        args[tv.value] = tv.addrspace
+    return args
+
+
+def load_case(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
+    buffers: dict[str, Buffer] = {}
+    for name, cfg in case.get("buffers", {}).items():
+        dtype = cfg.get("dtype", "f32")
+        if dtype != "f32":
+            raise SimError(f"buffer {name}: only f32 is supported now, got {dtype}")
+        space = cfg.get("space", "ub")
+        values = [float(x) for x in cfg.get("values", [])]
+        size = cfg.get("size")
+        if size is not None:
+            if len(values) > size:
+                raise SimError(f"buffer {name}: values longer than declared size")
+            values = values + [0.0] * (size - len(values))
+        buffers[name] = Buffer(name=name, values=values, dtype=dtype, space=space)
+    return buffers
+
+
+def pattern_to_mask(pattern: int) -> list[bool]:
+    # Codes observed in OpenTileAS CCE lowering: 0=all, 5=VL4, 6=VL8,
+    # 7=VL16, 8=VL32. Keep the first milestone deliberately conservative.
+    active_by_pattern = {
+        0: LANES_F32_V64,
+        5: 4,
+        6: 8,
+        7: 16,
+        8: 32,
+        9: LANES_F32_V64,
+    }
+    if pattern not in active_by_pattern:
+        raise SimError(f"unsupported pset pattern {pattern}")
+    active = active_by_pattern[pattern]
+    return [i < active for i in range(LANES_F32_V64)]
+
+
+class DavVAddSim:
+    def __init__(self, ir: str, case: dict[str, Any]) -> None:
+        self.ir = ir
+        self.case = case
+        self.entry = case.get("entry", "dav_vadd")
+        self.arg_spaces = parse_function_args(ir, self.entry)
+        self.buffers = build_buffers(case)
+        self.pointer_bindings = self._build_pointer_bindings()
+        self.values: dict[str, Any] = {}
+        self.trace: list[str] = []
+        self.unsupported: list[str] = []
+
+    def _build_pointer_bindings(self) -> dict[str, str]:
+        explicit = self.case.get("arguments", {})
+        bindings: dict[str, str] = {}
+        for symbol, addrspace in self.arg_spaces.items():
+            name = explicit.get(symbol, symbol.lstrip("%"))
+            if name not in self.buffers:
+                raise SimError(f"argument {symbol} maps to missing buffer {name!r}")
+            if addrspace is not None and addrspace != UB_ADDRSPACE:
+                raise SimError(
+                    f"argument {symbol} uses addrspace({addrspace}); "
+                    "only UB addrspace(6) is supported in the vadd milestone"
+                )
+            bindings[symbol] = name
+        return bindings
+
+    def _buffer_for_ptr(self, ptr: TypedValue) -> Buffer:
+        if not isinstance(ptr.value, str):
+            raise SimError("pointer operand is not an SSA value")
+        if ptr.addrspace is not None and ptr.addrspace != UB_ADDRSPACE:
+            raise SimError(
+                f"pointer {ptr.value} uses addrspace({ptr.addrspace}); "
+                "only UB addrspace(6) is supported now"
+            )
+        name = self.pointer_bindings.get(ptr.value)
+        if not name:
+            raise SimError(f"unbound pointer argument {ptr.value}")
+        buf = self.buffers[name]
+        if buf.space != "ub":
+            raise SimError(f"buffer {name} is in {buf.space}; vadd milestone supports UB only")
+        return buf
+
+    def _check_region(self, buf: Buffer, byte_offset: int, byte_count: int, op: str) -> int:
+        if byte_offset < 0:
+            raise SimError(f"{op} on {buf.name}: negative byte offset {byte_offset}")
+        if byte_offset % ALIGNMENT_BYTES != 0:
+            raise SimError(
+                f"{op} on {buf.name}: byte offset {byte_offset} is not "
+                f"{ALIGNMENT_BYTES}-byte aligned"
+            )
+        if byte_offset % F32_BYTES != 0:
+            raise SimError(f"{op} on {buf.name}: byte offset is not f32 aligned")
+        start = byte_offset // F32_BYTES
+        end = start + byte_count // F32_BYTES
+        if end > len(buf.values):
+            raise SimError(
+                f"{op} on {buf.name}: memory overflow, needs elements "
+                f"[{start}, {end}), buffer has {len(buf.values)}"
+            )
+        return start
+
+    def run(self) -> None:
+        for raw in self.ir.splitlines():
+            line = strip_comment(raw)
+            if not line:
+                continue
+            self._execute_line(line)
+
+        if self.unsupported:
+            uniq = sorted(set(self.unsupported))
+            raise SimError("unsupported llvm.hivm intrinsic(s): " + ", ".join(uniq))
+
+    def _execute_line(self, line: str) -> None:
+        if line.startswith("declare "):
+            return
+
+        call = re.search(r"(?:(%[-A-Za-z0-9_.$]+)\s*=\s*)?call\s+.*?(@llvm\.hivm\.[^(]+)\((.*)\)", line)
+        if not call:
+            if "@llvm.hivm." in line:
+                m = re.search(r"@llvm\.hivm\.[A-Za-z0-9_.$]+", line)
+                if m:
+                    self.unsupported.append(m.group(0))
+            return
+
+        lhs = call.group(1)
+        name = call.group(2)
+        args = [parse_typed_value(a) for a in split_args(call.group(3))]
+
+        if name == "@llvm.hivm.pset.b32":
+            if lhs is None:
+                raise SimError("pset result is unused")
+            pattern = self._as_int(args[0], "pset pattern")
+            self.values[lhs] = pattern_to_mask(pattern)
+            self.trace.append(f"{lhs} = pset({pattern})")
+            return
+
+        if name == "@llvm.hivm.vldsx1.v64f32":
+            if lhs is None:
+                raise SimError("vldsx1 result is unused")
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            buf = self._buffer_for_ptr(args[0])
+            byte_offset = self._as_int(args[1], "vldsx1 byte offset")
+            norm = self._as_int(args[2], "vldsx1 norm")
+            postupdate = self._as_int(args[3], "vldsx1 postupdate")
+            if norm != 0 or postupdate != 0:
+                raise SimError("vldsx1 milestone supports norm=0 and postupdate=0 only")
+            start = self._check_region(buf, byte_offset, VECTOR_BYTES_V64F32, "vldsx1")
+            self.values[lhs] = list(buf.values[start : start + LANES_F32_V64])
+            self.trace.append(f"{lhs} = vldsx1({buf.name}, byte_offset={byte_offset})")
+            return
+
+        if name == "@llvm.hivm.vadd.v64f32.x":
+            if lhs is None:
+                raise SimError("vadd result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            a = self._as_vector(args[0], "vadd lhs")
+            b = self._as_vector(args[1], "vadd rhs")
+            mask = self._as_mask(args[2], "vadd mask")
+            result: list[float | None] = []
+            for idx, active in enumerate(mask):
+                result.append(a[idx] + b[idx] if active else None)
+            self.values[lhs] = result
+            self.trace.append(f"{lhs} = vadd({args[0].value}, {args[1].value}, {args[2].value})")
+            return
+
+        if name == "@llvm.hivm.vstsx1.v64f32":
+            if len(args) != 6:
+                raise SimError(f"{name}: expected 6 args, got {len(args)}")
+            vec = self._as_vector(args[0], "vstsx1 value", allow_inactive=True)
+            buf = self._buffer_for_ptr(args[1])
+            byte_offset = self._as_int(args[2], "vstsx1 byte offset")
+            norm = self._as_int(args[3], "vstsx1 norm")
+            postupdate = self._as_int(args[4], "vstsx1 postupdate")
+            mask = self._as_mask(args[5], "vstsx1 mask")
+            if norm != 0 or postupdate != 0:
+                raise SimError("vstsx1 milestone supports norm=0 and postupdate=0 only")
+            start = self._check_region(buf, byte_offset, VECTOR_BYTES_V64F32, "vstsx1")
+            for idx, active in enumerate(mask):
+                if not active:
+                    continue
+                value = vec[idx]
+                if value is None:
+                    raise SimError(f"vstsx1 stores inactive/undefined lane {idx}")
+                buf.values[start + idx] = float(value)
+            self.trace.append(f"vstsx1({args[0].value}, {buf.name}, byte_offset={byte_offset})")
+            return
+
+        self.unsupported.append(name)
+
+    def _as_int(self, value: TypedValue, label: str) -> int:
+        if isinstance(value.value, int):
+            return value.value
+        bound = self.values.get(value.value)
+        if isinstance(bound, int):
+            return bound
+        raise SimError(f"{label}: expected integer, got {value.value}")
+
+    def _as_vector(
+        self, value: TypedValue, label: str, allow_inactive: bool = False
+    ) -> list[float | None]:
+        if not isinstance(value.value, str) or value.value not in self.values:
+            raise SimError(f"{label}: unknown vector {value.value}")
+        vec = self.values[value.value]
+        if not isinstance(vec, list) or len(vec) != LANES_F32_V64:
+            raise SimError(f"{label}: expected vector<{LANES_F32_V64}xf32>")
+        if not allow_inactive and any(x is None for x in vec):
+            raise SimError(f"{label}: vector contains inactive lanes")
+        return vec
+
+    def _as_mask(self, value: TypedValue, label: str) -> list[bool]:
+        if not isinstance(value.value, str) or value.value not in self.values:
+            raise SimError(f"{label}: unknown mask {value.value}")
+        mask = self.values[value.value]
+        if not isinstance(mask, list) or len(mask) != LANES_F32_V64:
+            raise SimError(f"{label}: expected predicate mask")
+        if not all(isinstance(x, bool) for x in mask):
+            raise SimError(f"{label}: expected predicate mask")
+        return mask
+
+    def check(self) -> tuple[bool, list[str]]:
+        failures: list[str] = []
+        for check in self.case.get("checks", []):
+            name = check["buffer"]
+            buf = self.buffers.get(name)
+            if buf is None:
+                failures.append(f"missing check buffer {name}")
+                continue
+            golden = [float(x) for x in check.get("golden", [])]
+            offset = int(check.get("offset", 0))
+            atol = float(check.get("atol", 0.0))
+            rtol = float(check.get("rtol", 0.0))
+            actual = buf.values[offset : offset + len(golden)]
+            if len(actual) != len(golden):
+                failures.append(f"{name}: actual slice shorter than golden")
+                continue
+            max_abs = 0.0
+            bad_at = None
+            for idx, (a, g) in enumerate(zip(actual, golden)):
+                diff = abs(a - g)
+                max_abs = max(max_abs, diff)
+                if math.isnan(a) != math.isnan(g) or diff > atol + rtol * abs(g):
+                    bad_at = idx
+                    break
+            if bad_at is not None:
+                failures.append(
+                    f"{name}: mismatch at element {offset + bad_at}: "
+                    f"actual={actual[bad_at]} golden={golden[bad_at]}"
+                )
+            else:
+                self.trace.append(f"check {name}[{offset}:{offset + len(golden)}] max_abs={max_abs}")
+        return not failures, failures
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Run a minimal dav LLVM IR simulation")
+    parser.add_argument("ir", type=Path, help="LLVM IR .ll file")
+    parser.add_argument("--case", required=True, type=Path, help="JSON case file")
+    parser.add_argument("--trace", action="store_true", help="print executed simulated ops")
+    args = parser.parse_args(argv)
+
+    try:
+        ir = args.ir.read_text(encoding="utf-8")
+        case = load_case(args.case)
+        sim = DavVAddSim(ir, case)
+        sim.run()
+        ok, failures = sim.check()
+        if args.trace:
+            for item in sim.trace:
+                print(item)
+        if ok:
+            print("ASC-SIM PASS")
+            return 0
+        for failure in failures:
+            print(f"ASC-SIM CHECK FAILED: {failure}", file=sys.stderr)
+        return 1
+    except SimError as e:
+        print(f"ASC-SIM ERROR: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
