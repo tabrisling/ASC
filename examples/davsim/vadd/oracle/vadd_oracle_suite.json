@@ -575,6 +575,19 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "opentile_vector_vcmax_m_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vcmax",
+      "mode": "m",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "error"
+    },
+    {
       "name": "opentile_vector_vcmin_lowered_n64",
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "op": "vcmin",
@@ -585,6 +598,19 @@
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
       "expect_asc_status": "pass"
+    },
+    {
+      "name": "opentile_vector_vcmin_m_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vcmin",
+      "mode": "m",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "error"
     },
     {
       "name": "opentile_vector_vmull_low_lowered_n64",
@@ -1232,6 +1258,18 @@
       "expect_simulator_status": "pass"
     },
     {
+      "name": "opentile_vector_vcmax_m_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vcmax",
+      "mode": "m",
+      "n_elements": 64,
+      "expect_simulator_status": "error"
+    },
+    {
       "name": "opentile_vector_vcmin_simulator_n64",
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "case_dir": "simulator/cases/vector_add",
@@ -1241,6 +1279,18 @@
       "op": "vcmin",
       "n_elements": 64,
       "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_vcmin_m_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vcmin",
+      "mode": "m",
+      "n_elements": 64,
+      "expect_simulator_status": "error"
     },
     {
       "name": "opentile_vector_vmull_low_simulator_n64",

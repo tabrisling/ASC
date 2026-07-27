@@ -94,6 +94,13 @@ VECTOR_REDUCTION_INTRINSICS = {
     "vcmin": "@llvm.hivm.vcmin.s.x.v64f32",
 }
 
+VECTOR_REDUCTION_MODE_INTRINSICS = {
+    ("vcmax", "m"): "@llvm.hivm.vcmax.s.m.v64f32",
+    ("vcmax", "x"): "@llvm.hivm.vcmax.s.x.v64f32",
+    ("vcmin", "m"): "@llvm.hivm.vcmin.s.m.v64f32",
+    ("vcmin", "x"): "@llvm.hivm.vcmin.s.x.v64f32",
+}
+
 VECTOR_VMULL_INTRINSICS = {
     ("vmull", "x"): "@llvm.hivm.vmull.s.x.v64f32",
     ("vmull", "m"): "@llvm.hivm.vmull.s.m.v64f32",
@@ -577,6 +584,8 @@ def op_intrinsic(op: str, mode: str = "x") -> str:
         return VECTOR_VMULL_INTRINSICS[(op, mode)]
     if (op, mode) in VECTOR_SCALAR_MODE_INTRINSICS:
         return VECTOR_SCALAR_MODE_INTRINSICS[(op, mode)]
+    if (op, mode) in VECTOR_REDUCTION_MODE_INTRINSICS:
+        return VECTOR_REDUCTION_MODE_INTRINSICS[(op, mode)]
     if mode != "x":
         raise RuntimeError(f"unsupported vector op/mode: {op}.{mode}")
     for table in (
@@ -922,12 +931,27 @@ def run_lowered_case(
     build_dir: Path,
     tmp_dir: Path,
 ) -> dict[str, Any]:
-    lowered, lower_result = materialize_lowered_ir(
-        case_cfg,
-        opentileas_repo,
-        build_dir,
-        tmp_dir / case_cfg["name"],
-    )
+    expected = case_cfg.get("expect_asc_status", "pass")
+    try:
+        lowered, lower_result = materialize_lowered_ir(
+            case_cfg,
+            opentileas_repo,
+            build_dir,
+            tmp_dir / case_cfg["name"],
+        )
+    except Exception as exc:
+        return {
+            "name": case_cfg["name"],
+            "kind": "lowered-opentile",
+            "status": "oracle_materialization_error",
+            "expected": expected,
+            "ok": expected == "oracle_materialization_error",
+            "returncode": None,
+            "lower_returncode": None,
+            "lowered_ir": None,
+            "stderr_tail": f"materialize-error: {exc}",
+            "stdout_tail": "",
+        }
     local_case = generated_vector_case(
         case_cfg.get("op", "vadd"),
         case_cfg.get("mode", "x"),
@@ -942,7 +966,6 @@ def run_lowered_case(
     write_json(work_case, local_case)
     result = run_command([str(asc_sim), str(lowered), "--case", str(work_case)])
     status = classify_asc_status(result.returncode)
-    expected = case_cfg.get("expect_asc_status", "pass")
     return {
         "name": case_cfg["name"],
         "kind": "lowered-opentile",

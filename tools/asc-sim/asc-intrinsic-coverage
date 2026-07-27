@@ -104,8 +104,14 @@ SUITE_OP_INTRINSICS = {
     "vsel": "@llvm.hivm.vsel.v64f32",
     "vexpdif": "@llvm.hivm.vexpdif.v64f32",
     "vcadd": "@llvm.hivm.vcadd.s.x.v64f32",
-    "vcmax": "@llvm.hivm.vcmax.s.x.v64f32",
-    "vcmin": "@llvm.hivm.vcmin.s.x.v64f32",
+    "vcmax": {
+        "m": "@llvm.hivm.vcmax.s.m.v64f32",
+        "x": "@llvm.hivm.vcmax.s.x.v64f32",
+    },
+    "vcmin": {
+        "m": "@llvm.hivm.vcmin.s.m.v64f32",
+        "x": "@llvm.hivm.vcmin.s.x.v64f32",
+    },
     "vmull": {
         "m": "@llvm.hivm.vmull.s.m.v64f32",
         "x": "@llvm.hivm.vmull.s.x.v64f32",
