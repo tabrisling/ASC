@@ -70,6 +70,10 @@ VMULL_VECTOR_OPS = {
     "@llvm.hivm.vmull.s.x.v64f32": "vmull",
 }
 
+BROADCAST_VECTOR_OPS = {
+    "@llvm.hivm.vbr.f32.v300": "vbr",
+}
+
 
 class SimError(RuntimeError):
     pass
@@ -677,6 +681,16 @@ class DavVAddSim:
 
         if name in VMULL_VECTOR_OPS:
             raise SimError("vmull.x is fail-closed: dav-c310 ccec crashes on the materialized oracle IR")
+
+        if name in BROADCAST_VECTOR_OPS:
+            if lhs is None:
+                raise SimError("vbr result is unused")
+            if len(args) != 1:
+                raise SimError(f"{name}: expected 1 arg, got {len(args)}")
+            scalar = self._as_float(args[0], "vbr scalar")
+            self.values[lhs] = [f32(scalar)] * LANES_F32_V64
+            self.trace.append(f"{lhs} = vbr({scalar})")
+            return
 
         if name == "@llvm.hivm.vdups.z.v64f32":
             if lhs is None:

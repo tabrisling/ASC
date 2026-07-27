@@ -95,6 +95,18 @@
       "expect_asc_status": "error"
     },
     {
+      "name": "gm_ub_register_vrec_decomposed_64",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "op": "vrec",
+      "decompose_vrec": true,
+      "intrinsics": [
+        "@llvm.hivm.vbr.f32.v300",
+        "@llvm.hivm.vdiv.s.x.v64f32"
+      ],
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "gm_ub_register_vexp_64",
       "ir": "../vadd.ll",
       "case": "../vadd.case.json",
@@ -435,6 +447,23 @@
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
       "expect_asc_status": "error"
+    },
+    {
+      "name": "opentile_vector_rec_decomposed_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vrec",
+      "decompose_vrec": true,
+      "intrinsics": [
+        "@llvm.hivm.vbr.f32.v300",
+        "@llvm.hivm.vdiv.s.x.v64f32"
+      ],
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
     },
     {
       "name": "opentile_vector_exp_lowered_n64",
@@ -1284,6 +1313,22 @@
       "expect_simulator_status": "error",
       "error_category": "simulator_instruction_error",
       "error_signature": "RV_VREC F32 unsupported"
+    },
+    {
+      "name": "opentile_vector_rec_decomposed_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vrec",
+      "decompose_vrec": true,
+      "intrinsics": [
+        "@llvm.hivm.vbr.f32.v300",
+        "@llvm.hivm.vdiv.s.x.v64f32"
+      ],
+      "n_elements": 64,
+      "expect_simulator_status": "pass"
     },
     {
       "name": "opentile_vector_add_simulator_n1023",

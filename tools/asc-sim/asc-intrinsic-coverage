@@ -41,6 +41,7 @@ MODEL_SUPPORTED = {
     "@llvm.hivm.vmuls.s.x.v64f32",
     "@llvm.hivm.vmaxs.s.x.v64f32",
     "@llvm.hivm.vmins.s.x.v64f32",
+    "@llvm.hivm.vbr.f32.v300",
     "@llvm.hivm.vdups.z.v64f32",
     "@llvm.hivm.vsel.v64f32",
     "@llvm.hivm.vexpdif.v64f32",

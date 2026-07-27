@@ -194,6 +194,7 @@ def run_asc_ir_case(
             mode=mode,
             part=int(case_cfg.get("part", 0)),
             extract=int(case_cfg.get("extract", 0)),
+            decompose_vrec=bool(case_cfg.get("decompose_vrec", False)),
         )
         apply_vector_op_case(
             case_json,
@@ -517,6 +518,7 @@ def patch_vector_compute_ir(
     mode: str = "x",
     part: int = 0,
     extract: int = 0,
+    decompose_vrec: bool = False,
 ) -> str:
     if op == "vadd" and mode == "x":
         return ir_text
@@ -538,6 +540,15 @@ def patch_vector_compute_ir(
             return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <64 x float> {b}, <256 x i1> {mask}, i32 {part})"
         if op in VECTOR_REDUCTION_INTRINSICS:
             return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <256 x i1> {mask})"
+        if op == "vrec" and decompose_vrec:
+            suffix = re.sub(r"[^A-Za-z0-9_]+", "_", lhs.lstrip("%")).strip("_") or "result"
+            ones_name = f"%asc_vrec_one_{suffix}"
+            return "\n".join(
+                [
+                    f"{ones_name} = call <64 x float> @llvm.hivm.vbr.f32.v300(float 1.000000e+00)",
+                    f"{lhs} = call <64 x float> @llvm.hivm.vdiv.s.x.v64f32(<64 x float> {ones_name}, <64 x float> {a}, <256 x i1> {mask})",
+                ]
+            )
         if op == "vmull":
             if mode != "x":
                 return (
@@ -576,6 +587,13 @@ def patch_vector_compute_ir(
         declare_target = f"declare <64 x float> {target}(<64 x float>, <64 x float>, <256 x i1>, i32)"
     elif op in VECTOR_REDUCTION_INTRINSICS:
         declare_target = f"declare <64 x float> {target}(<64 x float>, <256 x i1>)"
+    elif op == "vrec" and decompose_vrec:
+        declare_target = "\n".join(
+            [
+                "declare <64 x float> @llvm.hivm.vbr.f32.v300(float)",
+                "declare <64 x float> @llvm.hivm.vdiv.s.x.v64f32(<64 x float>, <64 x float>, <256 x i1>)",
+            ]
+        )
     elif op == "vmull":
         declare_target = f"declare {{ <64 x float>, <64 x float> }} {target}(<128 x float>, <128 x float>, <256 x i1>, <64 x float>)"
     elif op in VECTOR_UNARY_INTRINSICS:
@@ -730,6 +748,7 @@ def materialize_lowered_ir(
             mode=mode,
             part=int(case_cfg.get("part", 0)),
             extract=int(case_cfg.get("extract", 0)),
+            decompose_vrec=bool(case_cfg.get("decompose_vrec", False)),
         )
     text = patch_mask_patterns(text, case_cfg)
     if op == "vadd" and mode == "x" and not any(k in case_cfg for k in ("mask_pattern", "store_mask_pattern")):
@@ -795,6 +814,14 @@ def verify_materialized_ir(case_cfg: dict[str, Any], source_path: Path) -> None:
     op = case_cfg.get("op", "vadd")
     mode = case_cfg.get("mode", "x")
     expected_intrinsic = op_intrinsic(op, mode)
+    if op == "vrec" and case_cfg.get("decompose_vrec"):
+        for expected in (
+            "@llvm.hivm.vbr.f32.v300",
+            "@llvm.hivm.vdiv.s.x.v64f32",
+        ):
+            if expected not in text:
+                raise RuntimeError(f"{case_cfg['name']}: materialized IR missing {expected}")
+        return
     if expected_intrinsic not in text:
         raise RuntimeError(
             f"{case_cfg['name']}: materialized IR does not contain {expected_intrinsic}"
@@ -1051,6 +1078,7 @@ def oracle_key(case_cfg: dict[str, Any]) -> str:
         ("mode", case_cfg.get("mode", "x")),
         ("part", case_cfg.get("part") if case_cfg.get("op") == "vexpdif" else None),
         ("extract", case_cfg.get("extract") if case_cfg.get("op") == "vmull" else None),
+        ("decompose_vrec", case_cfg.get("decompose_vrec") if case_cfg.get("op") == "vrec" else None),
         ("mask", case_cfg.get("mask_pattern", 0)),
         ("store_mask", case_cfg.get("store_mask_pattern", case_cfg.get("mask_pattern", 0))),
         ("n", case_cfg.get("n_elements")),
