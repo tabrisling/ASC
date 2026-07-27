@@ -1057,6 +1057,253 @@
       "expect_asc_status": "error"
     },
     {
+      "name": "direct_ir_vabs_f16_unsupported",
+      "ir": "unsupported/vabs_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vabs.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vneg_f16_unsupported",
+      "ir": "unsupported/vneg_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vneg.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vrelu_f16_unsupported",
+      "ir": "unsupported/vrelu_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vrelu.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vsqrt_f16_unsupported",
+      "ir": "unsupported/vsqrt_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vsqrt.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vrsqrt_f16_unsupported",
+      "ir": "unsupported/vrsqrt_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vrsqrt.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vrec_f16_unsupported",
+      "ir": "unsupported/vrec_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vrec.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vexp_f16_unsupported",
+      "ir": "unsupported/vexp_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vexp.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vln_f16_unsupported",
+      "ir": "unsupported/vln_f16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vln.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vdiv_f16_x_unsupported",
+      "ir": "unsupported/vdiv_f16_x.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vdiv.s.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vmax_f16_x_unsupported",
+      "ir": "unsupported/vmax_f16_x.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vmax.s.x.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vadd_bf16_x_unsupported",
+      "ir": "unsupported/vadd_bf16_x.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vadd.s.x.v128bf16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vdups_bf16_unsupported",
+      "ir": "unsupported/vdups_bf16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vdups.z.v128bf16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_vexpdif_bf16_unsupported",
+      "ir": "unsupported/vexpdif_bf16.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vexpdif.v128bf16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
       "name": "gm_ub_register_vmull_low_64",
       "ir": "../vadd.ll",
       "case": "../vadd.case.json",
@@ -2322,6 +2569,42 @@
         "@llvm.hivm.vstsx1.v128f16"
       ],
       "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_vexp_f16_simulator_n128",
+      "ir": "unsupported/vexp_f16.ll",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vexp",
+      "suite_op": false,
+      "simulator_dtype": "float16",
+      "simulator_shape": 128,
+      "vector_lanes": 128,
+      "n_elements": 128,
+      "intrinsics": [
+        "@llvm.hivm.vexp.x.v128f16"
+      ],
+      "expect_simulator_status": "check_failed"
+    },
+    {
+      "name": "direct_ir_vdups_bf16_simulator_n128",
+      "ir": "unsupported/vdups_bf16.ll",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vdups",
+      "suite_op": false,
+      "simulator_dtype": "float16",
+      "simulator_shape": 128,
+      "vector_lanes": 128,
+      "n_elements": 128,
+      "intrinsics": [
+        "@llvm.hivm.vdups.z.v128bf16"
+      ],
+      "expect_simulator_status": "check_failed"
     },
     {
       "name": "opentile_vector_vmull_low_simulator_n64",
