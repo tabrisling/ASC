@@ -133,9 +133,11 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.psts.b8",
     "@llvm.hivm.pstu.b16",
     "@llvm.hivm.pstu.b32",
+    "@llvm.hivm.vldsx1.v128bf16",
     "@llvm.hivm.vldsx1.v128f16",
     "@llvm.hivm.vldsx1.v64f32",
     "@llvm.hivm.vlrelu.x.v128f16",
+    "@llvm.hivm.vstsx1.v128bf16",
     "@llvm.hivm.vstsx1.v128f16",
     "@llvm.hivm.vstsx1.v64f32",
     "@llvm.hivm.vstas",
@@ -153,6 +155,7 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vexp.x.v64f32",
     "@llvm.hivm.vln.x.v64f32",
     "@llvm.hivm.vlrelu.x.v64f32",
+    "@llvm.hivm.vmadd.m.v128bf16",
     "@llvm.hivm.vmadd.m.v128f16",
     "@llvm.hivm.vmadd.m.v64f32",
     "@llvm.hivm.vmulscvt.v128f16",
@@ -421,6 +424,16 @@ def f16(value: float) -> float:
         return struct.unpack("e", struct.pack("e", value))[0]
     except OverflowError:
         return math.copysign(float("inf"), value)
+
+
+def bf16(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    packed = struct.pack("<f", f32(value))
+    bits = struct.unpack("<I", packed)[0]
+    rounded = bits + 0x7FFF + ((bits >> 16) & 1)
+    bf16_bits = (rounded >> 16) & 0xFFFF
+    return struct.unpack("<f", struct.pack("<I", bf16_bits << 16))[0]
 
 
 def f32_div(a: float, b: float) -> float:
@@ -954,6 +967,32 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
                     "out": {"space": "gm", "dtype": "f16", "size": 128},
                 },
                 "ub_dtype": "f16",
+                "ub_size_bytes": 2048,
+                "dma_bytes": 256,
+                "checks": [{"buffer": "out", "golden": golden, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
+    if generated == "a5_vmadd_bf16_128":
+        lane = range(128)
+        dst = [bf16(((i % 9) - 4) * 0.5) for i in lane]
+        a = [bf16(((i % 7) - 3) * 0.25) for i in lane]
+        b = [bf16(((i % 5) - 2) * 0.125) for i in lane]
+        for idx, value in ((0, -0.0), (1, 0.0), (63, -3.5), (64, 1.25), (127, -1.0)):
+            dst[idx] = bf16(value)
+        golden = [bf16(f32(f32(dstv * av) + bv)) for dstv, av, bv in zip(dst, a, b)]
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_vmadd_bf16",
+                "arguments": {"%dst": "dst", "%a": "a", "%b": "b", "%out": "out"},
+                "buffers": {
+                    "dst": {"space": "gm", "dtype": "bf16", "values": dst},
+                    "a": {"space": "gm", "dtype": "bf16", "values": a},
+                    "b": {"space": "gm", "dtype": "bf16", "values": b},
+                    "out": {"space": "gm", "dtype": "bf16", "size": 128},
+                },
+                "ub_dtype": "bf16",
                 "ub_size_bytes": 2048,
                 "dma_bytes": 256,
                 "checks": [{"buffer": "out", "golden": golden, "atol": 0, "rtol": 0}],

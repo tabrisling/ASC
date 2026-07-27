@@ -22,12 +22,15 @@ from typing import Any, Callable
 
 LANES_F32_V64 = 64
 LANES_F16_V128 = 128
+LANES_BF16_V128 = 128
 LANES_F32_V128 = 128
 F32_BYTES = 4
 F16_BYTES = 2
+BF16_BYTES = 2
 I8_BYTES = 1
 VECTOR_BYTES_V64F32 = LANES_F32_V64 * F32_BYTES
 VECTOR_BYTES_V128F16 = LANES_F16_V128 * F16_BYTES
+VECTOR_BYTES_V128BF16 = LANES_BF16_V128 * BF16_BYTES
 PREDICATE_BYTES_B8 = 32
 B8_FULL_ACTIVE_STORED_BYTES = 2
 GM_ADDRSPACE = 1
@@ -97,6 +100,12 @@ TERNARY_VECTOR_OPS = {
         "m",
         lambda dst, a, b: f16(f16(dst * a) + b),
         LANES_F16_V128,
+    ),
+    "@llvm.hivm.vmadd.m.v128bf16": (
+        "vmadd",
+        "m",
+        lambda dst, a, b: bf16(f32(f32(dst * a) + b)),
+        LANES_BF16_V128,
     ),
 }
 
@@ -267,8 +276,8 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
     buffers: dict[str, Buffer] = {}
     for name, cfg in case.get("buffers", {}).items():
         dtype = cfg.get("dtype", "f32")
-        if dtype not in ("f32", "f16", "u8", "s8"):
-            raise SimError(f"buffer {name}: only f32/f16/u8/s8 are supported now, got {dtype}")
+        if dtype not in ("f32", "f16", "bf16", "u8", "s8"):
+            raise SimError(f"buffer {name}: only f32/f16/bf16/u8/s8 are supported now, got {dtype}")
         space = cfg.get("space", "ub")
         values = [round_dtype(float(x), dtype) for x in cfg.get("values", [])]
         size = cfg.get("size")
@@ -277,13 +286,13 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
                 raise SimError(f"buffer {name}: values longer than declared size")
             values = values + [0.0] * (size - len(values))
         buffers[name] = Buffer(name=name, values=values, dtype=dtype, space=space)
-    if "__ub" not in buffers and "__ub_f32" not in buffers and "__ub_f16" not in buffers:
+    if "__ub" not in buffers and "__ub_f32" not in buffers and "__ub_f16" not in buffers and "__ub_bf16" not in buffers:
         ub_size_bytes = int(case.get("ub_size_bytes", DEFAULT_UB_BYTES))
         ub_dtype = case.get("ub_dtype", "f32")
         ub_dtypes = ("f32", "f16") if ub_dtype == "mixed" else (ub_dtype,)
         for dtype in ub_dtypes:
-            if dtype not in ("f32", "f16", "u8", "s8"):
-                raise SimError(f"ub_dtype: only f32/f16/u8/s8/mixed are supported now, got {ub_dtype}")
+            if dtype not in ("f32", "f16", "bf16", "u8", "s8"):
+                raise SimError(f"ub_dtype: only f32/f16/bf16/u8/s8/mixed are supported now, got {ub_dtype}")
             element_bytes = dtype_bytes(dtype)
             if ub_size_bytes % element_bytes != 0:
                 raise SimError(f"ub_size_bytes must be divisible by {element_bytes} for {dtype}")
@@ -302,6 +311,8 @@ def dtype_bytes(dtype: str) -> int:
         return F32_BYTES
     if dtype == "f16":
         return F16_BYTES
+    if dtype == "bf16":
+        return BF16_BYTES
     if dtype in ("u8", "s8"):
         return I8_BYTES
     raise SimError(f"unsupported dtype {dtype}")
@@ -316,11 +327,23 @@ def f16(value: float) -> float:
         return math.copysign(float("inf"), value)
 
 
+def bf16(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    packed = struct.pack("<f", f32(value))
+    bits = struct.unpack("<I", packed)[0]
+    rounded = bits + 0x7FFF + ((bits >> 16) & 1)
+    bf16_bits = (rounded >> 16) & 0xFFFF
+    return struct.unpack("<f", struct.pack("<I", bf16_bits << 16))[0]
+
+
 def round_dtype(value: float, dtype: str) -> float:
     if dtype == "f32":
         return f32(value)
     if dtype == "f16":
         return f16(value)
+    if dtype == "bf16":
+        return bf16(value)
     if dtype == "u8":
         return float(int(value) & 0xFF)
     if dtype == "s8":
@@ -751,7 +774,7 @@ class DavVAddSim:
             if ".f16." in name:
                 expected_dtype = "f16"
             elif ".s8." in name:
-                expected_dtype = "u8"
+                expected_dtype = src.dtype if src.dtype in ("bf16", "u8") else "u8"
             else:
                 expected_dtype = "f32"
             dst, dst_base = self._resolve_pointer(args[0], "ub", preferred_dtype=expected_dtype)
@@ -772,6 +795,10 @@ class DavVAddSim:
             dst, dst_base = self._resolve_pointer(args[0], "gm")
             src, src_base = self._resolve_pointer(args[1], "ub", preferred_dtype=dst.dtype)
             byte_count = self._dma_out_byte_count(args[2])
+            raw_descriptor = self._as_int(args[2], "MOV.UB.TO.OUT descriptor")
+            low_count = raw_descriptor & 0xFFFF
+            if src.dtype == "bf16" and raw_descriptor >> 56 and low_count:
+                byte_count = low_count * BF16_BYTES
             self._copy_typed(src, src_base, dst, dst_base, byte_count, "MOV.UB.TO.OUT")
             self.trace.append(
                 f"MOV.UB.TO.OUT UB[{src_base}:{src_base + byte_count}] -> "
@@ -813,6 +840,24 @@ class DavVAddSim:
             start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V128F16, "vldsx1")
             self.values[lhs] = list(buf.values[start : start + LANES_F16_V128])
             self.trace.append(f"{lhs} = vldsx1.f16(UB, byte_offset={base_byte + byte_offset})")
+            return
+
+        if name == "@llvm.hivm.vldsx1.v128bf16":
+            if lhs is None:
+                raise SimError("vldsx1 result is unused")
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="bf16")
+            if buf.dtype != "bf16":
+                raise SimError(f"{name}: expected bf16 UB buffer, got {buf.dtype}")
+            byte_offset = self._as_int(args[1], "vldsx1 byte offset")
+            norm = self._as_int(args[2], "vldsx1 norm")
+            postupdate = self._as_int(args[3], "vldsx1 postupdate")
+            if norm != 0 or postupdate != 0:
+                raise SimError("vldsx1 bf16 milestone supports norm=0 and postupdate=0 only")
+            start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V128BF16, "vldsx1")
+            self.values[lhs] = list(buf.values[start : start + LANES_BF16_V128])
+            self.trace.append(f"{lhs} = vldsx1.bf16(UB, byte_offset={base_byte + byte_offset})")
             return
 
         if name in ("@llvm.hivm.plds.b8", "@llvm.hivm.pldi.b8"):
@@ -1055,6 +1100,30 @@ class DavVAddSim:
                     raise SimError(f"vstsx1 stores inactive/undefined lane {idx}")
                 buf.values[start + idx] = f16(float(value))
             self.trace.append(f"vstsx1.f16({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
+            return
+
+        if name == "@llvm.hivm.vstsx1.v128bf16":
+            if len(args) != 6:
+                raise SimError(f"{name}: expected 6 args, got {len(args)}")
+            vec = self._as_vector(args[0], "vstsx1 bf16 value", allow_inactive=True, lanes=LANES_BF16_V128)
+            buf, base_byte = self._resolve_pointer(args[1], "ub", preferred_dtype="bf16")
+            if buf.dtype != "bf16":
+                raise SimError(f"{name}: expected bf16 UB buffer, got {buf.dtype}")
+            byte_offset = self._as_int(args[2], "vstsx1 byte offset")
+            norm = self._as_int(args[3], "vstsx1 norm")
+            postupdate = self._as_int(args[4], "vstsx1 postupdate")
+            mask = self._as_mask(args[5], "vstsx1 bf16 mask", lanes=LANES_BF16_V128)
+            if norm not in (0, 2) or postupdate != 0:
+                raise SimError("vstsx1 bf16 milestone supports norm=0/2 and postupdate=0 only")
+            start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V128BF16, "vstsx1")
+            for idx, active in enumerate(mask):
+                if not active:
+                    continue
+                value = vec[idx]
+                if value is None:
+                    raise SimError(f"vstsx1 stores inactive/undefined lane {idx}")
+                buf.values[start + idx] = bf16(float(value))
+            self.trace.append(f"vstsx1.bf16({args[0].value}, UB, byte_offset={base_byte + byte_offset})")
             return
 
         if name in ("@llvm.hivm.psts.b8", "@llvm.hivm.psti.b8"):
