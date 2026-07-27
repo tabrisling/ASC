@@ -285,6 +285,7 @@ def run_asc_ir_case(
     return {
         "name": case_cfg["name"],
         "kind": "asc-ir",
+        "oracle_key": oracle_key(case_cfg),
         "status": status,
         "expected": expected,
         "ok": status == expected,
@@ -1090,6 +1091,7 @@ def run_external_asc_static_case(
         return {
             "name": case_cfg["name"],
             "kind": "external-asc-static",
+            "oracle_key": oracle_key(case_cfg),
             "status": status,
             "expected": expected,
             "ok": status == expected,
@@ -1105,6 +1107,7 @@ def run_external_asc_static_case(
         return {
             "name": case_cfg["name"],
             "kind": "external-asc-static",
+            "oracle_key": oracle_key(case_cfg),
             "status": status,
             "expected": expected,
             "ok": status == expected,
@@ -1136,6 +1139,7 @@ def run_lowered_case(
         return {
             "name": case_cfg["name"],
             "kind": "lowered-opentile",
+            "oracle_key": oracle_key(case_cfg),
             "status": "oracle_materialization_error",
             "expected": expected,
             "ok": expected == "oracle_materialization_error",
@@ -1162,6 +1166,7 @@ def run_lowered_case(
     return {
         "name": case_cfg["name"],
         "kind": "lowered-opentile",
+        "oracle_key": oracle_key(case_cfg),
         "status": status,
         "expected": expected,
         "ok": status == expected and lower_result.returncode == 0,
@@ -1263,6 +1268,7 @@ def run_simulator_case(
         return {
             "name": case_cfg["name"],
             "kind": "simulator-oracle",
+            "oracle_key": oracle_key(case_cfg),
             "status": "oracle_materialization_error",
             "expected": expected,
             "ok": expected == "oracle_materialization_error",
@@ -1303,6 +1309,7 @@ def run_simulator_case(
     return {
         "name": case_cfg["name"],
         "kind": "simulator-oracle",
+        "oracle_key": oracle_key(case_cfg),
         "status": status,
         "expected": expected,
         "ok": status == expected,
@@ -1546,6 +1553,43 @@ def check_simulator_coverage(suite: dict[str, Any], run_simulator: bool) -> list
     return gaps
 
 
+def check_behavior_consistency(results: list[dict[str, Any]], run_simulator: bool) -> list[str]:
+    if not run_simulator:
+        return ["behavior consistency requires --run-simulator"]
+
+    by_key: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for item in results:
+        key = item.get("oracle_key")
+        if not key:
+            continue
+        bucket = by_key.setdefault(str(key), {"asc": [], "simulator": []})
+        if item.get("kind") == "simulator-oracle":
+            bucket["simulator"].append(item)
+        elif item.get("kind") in ("asc-ir", "lowered-opentile", "external-asc-static"):
+            bucket["asc"].append(item)
+
+    gaps: list[str] = []
+    for key, grouped in sorted(by_key.items()):
+        asc_passes = [item for item in grouped["asc"] if item.get("status") == "pass"]
+        if not asc_passes:
+            continue
+        simulator_results = grouped["simulator"]
+        if not simulator_results:
+            continue
+        simulator_passes = [item for item in simulator_results if item.get("status") == "pass"]
+        if simulator_passes:
+            continue
+        asc_names = ", ".join(item["name"] for item in asc_passes)
+        simulator_states = ", ".join(
+            f"{item['name']}:{item['status']}" for item in simulator_results
+        )
+        gaps.append(
+            f"{key}: ASC pass result(s) [{asc_names}] have no matching simulator pass; "
+            f"simulator result(s): [{simulator_states}]"
+        )
+    return gaps
+
+
 def discover_a5_mlir_cases(opentileas_repo: Path) -> dict[str, Path]:
     cases_dir = opentileas_repo / "simulator" / "cases"
     if not cases_dir.is_dir():
@@ -1634,6 +1678,11 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="fail if OpenTileAS simulator/cases/a5_* MLIR cases are missing from suite external_cases",
     )
+    parser.add_argument(
+        "--enforce-behavior-consistency",
+        action="store_true",
+        help="fail if an actual ASC-pass result has a matching simulator result that is not pass",
+    )
     args = parser.parse_args(argv)
 
     suite_path = args.suite.resolve()
@@ -1703,10 +1752,15 @@ def main(argv: list[str]) -> int:
 
     print_report(results)
     coverage_gaps = check_simulator_coverage(suite, args.run_simulator)
+    behavior_gaps = check_behavior_consistency(results, args.run_simulator)
     a5_coverage_gaps = check_a5_external_coverage(full_suite, args.opentileas_repo.resolve())
     if args.enforce_simulator_coverage and coverage_gaps:
         print("[simulator-coverage]")
         for gap in coverage_gaps:
+            print(f"  {gap}")
+    if args.enforce_behavior_consistency and behavior_gaps:
+        print("[behavior-consistency]")
+        for gap in behavior_gaps:
             print(f"  {gap}")
     if args.enforce_a5_external_coverage and a5_coverage_gaps:
         print("[a5-external-coverage]")
@@ -1718,6 +1772,7 @@ def main(argv: list[str]) -> int:
             {
                 "results": results,
                 "coverage_gaps": coverage_gaps,
+                "behavior_consistency_gaps": behavior_gaps,
                 "a5_external_coverage_gaps": a5_coverage_gaps,
             },
         )
@@ -1725,6 +1780,7 @@ def main(argv: list[str]) -> int:
         0
         if all(item["ok"] for item in results)
         and not (args.enforce_simulator_coverage and coverage_gaps)
+        and not (args.enforce_behavior_consistency and behavior_gaps)
         and not (args.enforce_a5_external_coverage and a5_coverage_gaps)
         else 1
     )
