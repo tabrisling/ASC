@@ -1241,6 +1241,55 @@ def check_simulator_coverage(suite: dict[str, Any], run_simulator: bool) -> list
     return gaps
 
 
+def discover_a5_mlir_cases(opentileas_repo: Path) -> dict[str, Path]:
+    cases_dir = opentileas_repo / "simulator" / "cases"
+    if not cases_dir.is_dir():
+        return {}
+    discovered: dict[str, Path] = {}
+    for mlir_path in sorted(cases_dir.glob("a5_*/kernel.cce.mlir")):
+        discovered[f"opentile_{mlir_path.parent.name}"] = mlir_path
+    return discovered
+
+
+def check_a5_external_coverage(suite: dict[str, Any], opentileas_repo: Path) -> list[str]:
+    discovered = discover_a5_mlir_cases(opentileas_repo)
+    gaps: list[str] = []
+    if not discovered:
+        gaps.append(f"no OpenTileAS A5 MLIR cases found under {opentileas_repo / 'simulator' / 'cases'}")
+        return gaps
+
+    configured_cases = {
+        case["name"]: case
+        for case in suite.get("external_cases", [])
+        if case.get("name", "").startswith("opentile_a5_")
+    }
+    missing = sorted(set(discovered) - set(configured_cases))
+    stale = sorted(set(configured_cases) - set(discovered))
+    for name in missing:
+        rel = discovered[name].relative_to(opentileas_repo)
+        gaps.append(f"{name}: OpenTileAS A5 MLIR case is missing from suite external_cases ({rel})")
+    for name in stale:
+        gaps.append(f"{name}: suite external_cases entry has no matching OpenTileAS simulator/cases/a5_* directory")
+
+    for name, case in sorted(configured_cases.items()):
+        mlir_value = case.get("mlir")
+        if not mlir_value:
+            gaps.append(f"{name}: suite external_cases entry is missing mlir")
+            continue
+        mlir_path = (opentileas_repo / mlir_value).resolve()
+        expected_path = discovered.get(name)
+        if not mlir_path.is_file():
+            gaps.append(f"{name}: configured MLIR path does not exist: {mlir_value}")
+            continue
+        if expected_path and mlir_path != expected_path.resolve():
+            expected_rel = expected_path.relative_to(opentileas_repo)
+            gaps.append(f"{name}: configured MLIR path {mlir_value} does not match discovered {expected_rel}")
+        case_dir_value = case.get("case_dir")
+        if case_dir_value and not (opentileas_repo / case_dir_value).is_dir():
+            gaps.append(f"{name}: configured case_dir does not exist: {case_dir_value}")
+    return gaps
+
+
 def filter_suite_cases(suite: dict[str, Any], case_filter: str) -> dict[str, Any]:
     pattern = re.compile(case_filter)
     filtered = copy.deepcopy(suite)
@@ -1275,10 +1324,16 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="fail if an ASC-pass lowered case lacks a matching simulator oracle case",
     )
+    parser.add_argument(
+        "--enforce-a5-external-coverage",
+        action="store_true",
+        help="fail if OpenTileAS simulator/cases/a5_* MLIR cases are missing from suite external_cases",
+    )
     args = parser.parse_args(argv)
 
     suite_path = args.suite.resolve()
-    suite = load_json(suite_path)
+    full_suite = load_json(suite_path)
+    suite = full_suite
     if args.case_filter:
         suite = filter_suite_cases(suite, args.case_filter)
     suite_dir = suite_path.parent
@@ -1341,13 +1396,31 @@ def main(argv: list[str]) -> int:
 
     print_report(results)
     coverage_gaps = check_simulator_coverage(suite, args.run_simulator)
+    a5_coverage_gaps = check_a5_external_coverage(full_suite, args.opentileas_repo.resolve())
     if args.enforce_simulator_coverage and coverage_gaps:
         print("[simulator-coverage]")
         for gap in coverage_gaps:
             print(f"  {gap}")
+    if args.enforce_a5_external_coverage and a5_coverage_gaps:
+        print("[a5-external-coverage]")
+        for gap in a5_coverage_gaps:
+            print(f"  {gap}")
     if args.report:
-        write_json(args.report.resolve(), {"results": results, "coverage_gaps": coverage_gaps})
-    return 0 if all(item["ok"] for item in results) and not (args.enforce_simulator_coverage and coverage_gaps) else 1
+        write_json(
+            args.report.resolve(),
+            {
+                "results": results,
+                "coverage_gaps": coverage_gaps,
+                "a5_external_coverage_gaps": a5_coverage_gaps,
+            },
+        )
+    return (
+        0
+        if all(item["ok"] for item in results)
+        and not (args.enforce_simulator_coverage and coverage_gaps)
+        and not (args.enforce_a5_external_coverage and a5_coverage_gaps)
+        else 1
+    )
 
 
 if __name__ == "__main__":
