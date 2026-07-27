@@ -657,6 +657,54 @@ class DavVAddSim:
         dst_start = self._check_region(dst, dst_byte_offset, byte_count, op + " write")
         count = byte_count // dtype_bytes(src.dtype)
         dst.values[dst_start : dst_start + count] = src.values[src_start : src_start + count]
+        if dst.space == "ub" and dst.dtype in ("u8", "s8"):
+            self._mirror_u8_range_to_typed_ub_views(dst_byte_offset, byte_count, op)
+
+    def _mirror_u8_range_to_typed_ub_views(
+        self,
+        byte_offset: int,
+        byte_count: int,
+        op: str,
+    ) -> None:
+        byte_view = self.buffers.get("__ub_u8") or self.buffers.get("__ub_s8")
+        if byte_view is None:
+            return
+        start = self._check_region(byte_view, byte_offset, byte_count, op + " byte mirror", alignment=1)
+        raw = [int(x) & 0xFF for x in byte_view.values[start : start + byte_count]]
+        if byte_offset % I16_BYTES == 0 and byte_count % I16_BYTES == 0:
+            words16 = pack_u16_words_from_bytes(raw)
+            for name in ("__ub_u16", "__ub_s16", "__ub_f16", "__ub_bf16"):
+                view = self.buffers.get(name)
+                if view is None:
+                    continue
+                view_start = self._check_region(
+                    view,
+                    byte_offset,
+                    byte_count,
+                    op + f" mirror {view.dtype}",
+                    alignment=1,
+                )
+                if view.dtype == "s16":
+                    view.values[view_start : view_start + len(words16)] = [s16(x) for x in words16]
+                else:
+                    view.values[view_start : view_start + len(words16)] = words16
+        if byte_offset % I32_BYTES == 0 and byte_count % I32_BYTES == 0:
+            words32 = pack_u32_words_from_bytes(raw)
+            for name in ("__ub_u32", "__ub_s32", "__ub_f32"):
+                view = self.buffers.get(name)
+                if view is None:
+                    continue
+                view_start = self._check_region(
+                    view,
+                    byte_offset,
+                    byte_count,
+                    op + f" mirror {view.dtype}",
+                    alignment=1,
+                )
+                if view.dtype == "s32":
+                    view.values[view_start : view_start + len(words32)] = [s32(x) for x in words32]
+                else:
+                    view.values[view_start : view_start + len(words32)] = words32
 
     def _read_ub_bytes(self, buf: Buffer, byte_offset: int, byte_count: int, op: str) -> list[int]:
         if buf.dtype not in ("u8", "s8"):
@@ -999,10 +1047,11 @@ class DavVAddSim:
                 raise SimError(
                     f"{name}: expected {expected_dtype} buffers, got {src.dtype}->{dst.dtype}"
                 )
-            self._copy_typed(src, src_base, dst, dst_base, self.dma_bytes, "MOV.OUT.TO.UB")
+            byte_count = self._dma_in_byte_count(args[2], src, src_base, dst, dst_base)
+            self._copy_typed(src, src_base, dst, dst_base, byte_count, "MOV.OUT.TO.UB")
             self.trace.append(
-                f"MOV.OUT.TO.UB {src.name}[0:{self.dma_bytes}] -> "
-                f"UB[{dst_base}:{dst_base + self.dma_bytes}]"
+                f"MOV.OUT.TO.UB {src.name}[0:{byte_count}] -> "
+                f"UB[{dst_base}:{dst_base + byte_count}]"
             )
             return
 
@@ -1223,6 +1272,106 @@ class DavVAddSim:
                 )
             self.values[lhs] = pack_u32_words_from_bytes(gathered_bytes)
             self.trace.append(f"{lhs} = vgatherb.i32/u32/f32(UB, byte_offset={base_byte})")
+            return
+
+        if name in (
+            "@llvm.hivm.vgather2.v300.v256s8",
+            "@llvm.hivm.vgather2.v300.v256u8",
+        ):
+            if lhs is None:
+                raise SimError("vgather2 result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u8")
+            if buf.dtype not in ("u8", "s8"):
+                raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
+            indices = self._u16_indices_from_u32_vector(args[1], "vgather2 b8 indices")
+            mask = self._as_mask(args[2], "vgather2 b8 mask", lanes=LANES_I8_V256)
+            if not all(mask):
+                raise SimError("vgather2 b8 milestone supports full b8 mask only")
+            gathered: list[int] = []
+            for raw_index in indices:
+                byte_offset = int(raw_index)
+                if byte_offset < 0:
+                    raise SimError("vgather2 b8 milestone rejects negative indices")
+                values = self._read_ub_bytes(
+                    buf,
+                    base_byte + byte_offset,
+                    I8_BYTES,
+                    "vgather2 b8",
+                )
+                gathered.append(values[0])
+            self.values[lhs] = gathered
+            self.trace.append(f"{lhs} = vgather2.b8(UB, byte_offset={base_byte})")
+            return
+
+        if name in (
+            "@llvm.hivm.vgather2.v300.v128s16",
+            "@llvm.hivm.vgather2.v300.v128u16",
+            "@llvm.hivm.vgather2.v300.v128f16",
+            "@llvm.hivm.vgather2.v300.v128bf16",
+        ):
+            if lhs is None:
+                raise SimError("vgather2 result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u8")
+            if buf.dtype not in ("u8", "s8"):
+                raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
+            indices = self._u16_indices_from_u32_vector(args[1], "vgather2 b16 indices")
+            mask = self._as_mask(args[2], "vgather2 b16 mask", lanes=LANES_I16_V128)
+            if not all(mask):
+                raise SimError("vgather2 b16 milestone supports full b16 mask only")
+            gathered_bytes: list[int] = []
+            for raw_index in indices:
+                element_offset = int(raw_index) * I16_BYTES
+                if element_offset < 0:
+                    raise SimError("vgather2 b16 milestone rejects negative indices")
+                gathered_bytes.extend(
+                    self._read_ub_bytes(
+                        buf,
+                        base_byte + element_offset,
+                        I16_BYTES,
+                        "vgather2 b16",
+                    )
+                )
+            self.values[lhs] = pack_u16_words_from_bytes(gathered_bytes)
+            self.trace.append(f"{lhs} = vgather2.b16(UB, byte_offset={base_byte})")
+            return
+
+        if name in (
+            "@llvm.hivm.vgather2.v300.v64s32",
+            "@llvm.hivm.vgather2.v300.v64u32",
+            "@llvm.hivm.vgather2.v300.v64f32",
+        ):
+            if lhs is None:
+                raise SimError("vgather2 result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u8")
+            if buf.dtype not in ("u8", "s8"):
+                raise SimError(f"{name}: expected byte UB buffer, got {buf.dtype}")
+            indices = self._as_u32_vector(args[1], "vgather2 b32 indices")
+            mask = self._as_mask(args[2], "vgather2 b32 mask", lanes=LANES_I32_V64)
+            if not all(mask):
+                raise SimError("vgather2 b32 milestone supports full b32 mask only")
+            gathered_bytes: list[int] = []
+            for raw_index in indices:
+                if raw_index is None:
+                    raise SimError("vgather2 b32 reads inactive index lane")
+                element_offset = int(raw_index) * I32_BYTES
+                if element_offset < 0:
+                    raise SimError("vgather2 b32 milestone rejects negative indices")
+                gathered_bytes.extend(
+                    self._read_ub_bytes(
+                        buf,
+                        base_byte + element_offset,
+                        I32_BYTES,
+                        "vgather2 b32",
+                    )
+                )
+            self.values[lhs] = pack_u32_words_from_bytes(gathered_bytes)
+            self.trace.append(f"{lhs} = vgather2.b32(UB, byte_offset={base_byte})")
             return
 
         if name == "@llvm.hivm.vldsx1.v128f16":
@@ -2091,6 +2240,23 @@ class DavVAddSim:
             raise SimError("MOV.UB.TO.OUT: zero-length DMA burst is illegal")
         return encoded or self.dma_bytes
 
+    def _dma_in_byte_count(
+        self,
+        descriptor: TypedValue,
+        src: Buffer,
+        src_base: int,
+        dst: Buffer,
+        dst_base: int,
+    ) -> int:
+        raw = self._as_int(descriptor, "MOV.OUT.TO.UB descriptor")
+        low_count = raw & 0xFFFF
+        candidate = low_count * DMA_V2_LOW_COUNT_BYTES
+        src_available = (len(src.values) * dtype_bytes(src.dtype)) - src_base
+        dst_available = (len(dst.values) * dtype_bytes(dst.dtype)) - dst_base
+        if raw >> 56 and low_count and candidate <= src_available and candidate <= dst_available:
+            return candidate
+        return self.dma_bytes
+
     def _execute_generic_call(self, lhs: str | None, name: str, arg_text: str) -> None:
         args = [parse_typed_value(a) for a in split_args(arg_text)]
         if name == "@llvm.smax.i32":
@@ -2200,6 +2366,19 @@ class DavVAddSim:
                 raise SimError(f"{label}: lane {idx} is not an i32 value")
             result.append(u32(item))
         return result
+
+    def _u16_indices_from_u32_vector(self, value: TypedValue, label: str) -> list[int]:
+        packed = self._as_u32_vector(value, label)
+        indices: list[int] = []
+        for lane, item in enumerate(packed):
+            if item is None:
+                raise SimError(f"{label}: lane {lane} is inactive")
+            raw = u32(item)
+            indices.append(raw & 0xFFFF)
+            indices.append((raw >> 16) & 0xFFFF)
+        if len(indices) != LANES_I16_V128:
+            raise SimError(f"{label}: expected {LANES_I16_V128} unpacked u16 indices")
+        return indices
 
     def _as_u16_vector(
         self,
