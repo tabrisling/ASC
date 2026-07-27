@@ -22,7 +22,9 @@ alignment, DMA region bounds, and buffer overflow, but it does not model cycle
 timing or pipeline scheduling.
 
 Run the oracle suite to exercise local negative cases and an OpenTileAS
-vector_add kernel after real dav-351x lowering:
+vector_add kernel after real dav-351x lowering. The suite also reuses the same
+GM/UB/register data path to check the first batch of f32 vector compute ops:
+`vadd`, `vsub`, `vmul`, `vdiv`, `vmax`, and `vmin`.
 
 ```bash
 build/bin/asc-sim-oracle

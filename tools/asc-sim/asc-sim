@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Minimal dav LLVM intrinsic functional simulator.
 
-This is intentionally narrow: the first milestone supports a single vector add
-pipeline with GM kernel arguments, explicit GM<->UB DMA, pset, vldsx1, vadd,
+This is intentionally narrow: it supports a small f32 vector pipeline with GM
+kernel arguments, explicit GM<->UB DMA, pset, vldsx1, vector compute intrinsics,
 and vstsx1. It is a fast local preflight tool for OpenTileAS-produced LLVM IR,
 not a cycle-accurate hardware simulator.
 """
@@ -27,6 +27,16 @@ GM_ADDRSPACE = 1
 UB_ADDRSPACE = 6
 ALIGNMENT_BYTES = 32
 DEFAULT_UB_BYTES = 4096
+
+BINARY_VECTOR_OPS = {
+    "@llvm.hivm.vadd.v64f32.x": ("vadd", lambda a, b: f32(a + b)),
+    "@llvm.hivm.vadd.s.x.v64f32": ("vadd", lambda a, b: f32(a + b)),
+    "@llvm.hivm.vsub.s.x.v64f32": ("vsub", lambda a, b: f32(a - b)),
+    "@llvm.hivm.vmul.s.x.v64f32": ("vmul", lambda a, b: f32(a * b)),
+    "@llvm.hivm.vdiv.s.x.v64f32": ("vdiv", lambda a, b: f32_div(a, b)),
+    "@llvm.hivm.vmax.s.x.v64f32": ("vmax", lambda a, b: f32(max(a, b))),
+    "@llvm.hivm.vmin.s.x.v64f32": ("vmin", lambda a, b: f32(min(a, b))),
+}
 
 
 class SimError(RuntimeError):
@@ -159,6 +169,16 @@ def f32(value: float) -> float:
         return struct.unpack("f", struct.pack("f", value))[0]
     except OverflowError:
         return math.copysign(float("inf"), value)
+
+
+def f32_div(a: float, b: float) -> float:
+    if math.isnan(a) or math.isnan(b):
+        return float("nan")
+    if b == 0.0:
+        if a == 0.0:
+            return float("nan")
+        return math.copysign(float("inf"), a * b)
+    return f32(a / b)
 
 
 def pattern_to_mask(pattern: int) -> list[bool]:
@@ -499,19 +519,22 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = vldsx1(UB, byte_offset={base_byte + byte_offset})")
             return
 
-        if name in ("@llvm.hivm.vadd.v64f32.x", "@llvm.hivm.vadd.s.x.v64f32"):
+        if name in BINARY_VECTOR_OPS:
             if lhs is None:
-                raise SimError("vadd result is unused")
+                raise SimError(f"{BINARY_VECTOR_OPS[name][0]} result is unused")
             if len(args) != 3:
                 raise SimError(f"{name}: expected 3 args, got {len(args)}")
-            a = self._as_vector(args[0], "vadd lhs")
-            b = self._as_vector(args[1], "vadd rhs")
-            mask = self._as_mask(args[2], "vadd mask")
+            op_label, op = BINARY_VECTOR_OPS[name]
+            a = self._as_vector(args[0], f"{op_label} lhs")
+            b = self._as_vector(args[1], f"{op_label} rhs")
+            mask = self._as_mask(args[2], f"{op_label} mask")
             result: list[float | None] = []
             for idx, active in enumerate(mask):
-                result.append(f32(float(a[idx]) + float(b[idx])) if active else None)
+                result.append(op(float(a[idx]), float(b[idx])) if active else None)
             self.values[lhs] = result
-            self.trace.append(f"{lhs} = vadd({args[0].value}, {args[1].value}, {args[2].value})")
+            self.trace.append(
+                f"{lhs} = {op_label}({args[0].value}, {args[1].value}, {args[2].value})"
+            )
             return
 
         if name == "@llvm.hivm.vstsx1.v64f32":

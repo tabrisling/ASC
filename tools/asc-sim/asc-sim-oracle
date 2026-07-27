@@ -19,6 +19,16 @@ from pathlib import Path
 from typing import Any
 
 
+VECTOR_BINARY_INTRINSICS = {
+    "vadd": "@llvm.hivm.vadd.s.x.v64f32",
+    "vsub": "@llvm.hivm.vsub.s.x.v64f32",
+    "vmul": "@llvm.hivm.vmul.s.x.v64f32",
+    "vdiv": "@llvm.hivm.vdiv.s.x.v64f32",
+    "vmax": "@llvm.hivm.vmax.s.x.v64f32",
+    "vmin": "@llvm.hivm.vmin.s.x.v64f32",
+}
+
+
 def load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -80,6 +90,11 @@ def run_asc_ir_case(
     generated = case_cfg.get("generated")
     if generated:
         apply_generated_asc_case(case_json, generated)
+    op = case_cfg.get("op")
+    if op and op != "vadd":
+        replace_handwritten_binary_op(case_cfg["name"], op, ir_text)
+        ir_text = ir_text.replace("@llvm.hivm.vadd.v64f32.x", local_intrinsic_for(op))
+        apply_binary_op_case(case_json, op)
 
     work_ir = tmp_dir / f"{case_cfg['name']}.ll"
     work_case = tmp_dir / f"{case_cfg['name']}.case.json"
@@ -101,7 +116,8 @@ def run_asc_ir_case(
     }
 
 
-def generated_vadd_case(
+def generated_vector_case(
+    op: str,
     n_elements: int,
     allocated_elements: int,
     ub_size_bytes: int,
@@ -112,7 +128,7 @@ def generated_vadd_case(
     active = max(0, min(n_elements, allocated_elements))
     golden = [0.0] * allocated_elements
     for idx in range(active):
-        golden[idx] = x[idx] + y[idx]
+        golden[idx] = eval_binary_op(op, x[idx], y[idx])
     return {
         "entry": "add_kernel",
         "arguments": {"%0": "x", "%1": "y", "%2": "output"},
@@ -135,6 +151,51 @@ def f32(value: float) -> float:
         return struct.unpack("f", struct.pack("f", value))[0]
     except OverflowError:
         return math.copysign(float("inf"), value)
+
+
+def f32_div(a: float, b: float) -> float:
+    if math.isnan(a) or math.isnan(b):
+        return float("nan")
+    if b == 0.0:
+        if a == 0.0:
+            return float("nan")
+        return math.copysign(float("inf"), a * b)
+    return f32(a / b)
+
+
+def eval_binary_op(op: str, a: float, b: float) -> float:
+    if op == "vadd":
+        return f32(a + b)
+    if op == "vsub":
+        return f32(a - b)
+    if op == "vmul":
+        return f32(a * b)
+    if op == "vdiv":
+        return f32_div(a, b)
+    if op == "vmax":
+        return f32(max(a, b))
+    if op == "vmin":
+        return f32(min(a, b))
+    raise RuntimeError(f"unsupported vector op: {op}")
+
+
+def local_intrinsic_for(op: str) -> str:
+    if op not in VECTOR_BINARY_INTRINSICS:
+        raise RuntimeError(f"unsupported local vector op: {op}")
+    return VECTOR_BINARY_INTRINSICS[op]
+
+
+def replace_handwritten_binary_op(case_name: str, op: str, ir_text: str) -> None:
+    if "@llvm.hivm.vadd.v64f32.x" not in ir_text:
+        raise RuntimeError(f"{case_name}: handwritten vadd intrinsic not found")
+    if op not in VECTOR_BINARY_INTRINSICS:
+        raise RuntimeError(f"{case_name}: unsupported op {op}")
+
+
+def apply_binary_op_case(case_json: dict[str, Any], op: str) -> None:
+    a = [float(x) for x in case_json["buffers"]["a"]["values"]]
+    b = [float(x) for x in case_json["buffers"]["b"]["values"]]
+    case_json["checks"][0]["golden"] = [eval_binary_op(op, x, y) for x, y in zip(a, b)]
 
 
 def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
@@ -171,7 +232,7 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
     else:
         raise RuntimeError(f"unknown generated ASC case: {generated}")
 
-    golden = [f32(float(x) + float(y)) for x, y in zip(a, b)]
+    golden = [eval_binary_op("vadd", float(x), float(y)) for x, y in zip(a, b)]
     case_json["buffers"]["a"]["values"] = a
     case_json["buffers"]["b"]["values"] = b
     case_json["checks"][0]["golden"] = golden
@@ -212,13 +273,12 @@ def lower_opentile_case(
     return candidates[0], result
 
 
-def run_lowered_case(
+def materialize_lowered_ir(
     case_cfg: dict[str, Any],
-    asc_sim: Path,
     opentileas_repo: Path,
     build_dir: Path,
     tmp_dir: Path,
-) -> dict[str, Any]:
+) -> tuple[Path, subprocess.CompletedProcess[str]]:
     mlir = (opentileas_repo / case_cfg["mlir"]).resolve()
     lowered, lower_result = lower_opentile_case(
         opentileas_repo,
@@ -226,9 +286,38 @@ def run_lowered_case(
         mlir,
         case_cfg.get("target", "dav-351x"),
         case_cfg.get("fusion_mode", "no_fuse"),
+        tmp_dir,
+    )
+    op = case_cfg.get("op", "vadd")
+    if op == "vadd":
+        return lowered, lower_result
+    if op not in VECTOR_BINARY_INTRINSICS:
+        raise RuntimeError(f"unsupported lowered vector op: {op}")
+    text = lowered.read_text(encoding="utf-8")
+    target = VECTOR_BINARY_INTRINSICS[op]
+    if VECTOR_BINARY_INTRINSICS["vadd"] not in text:
+        raise RuntimeError("lowered vector_add IR does not contain vadd.s.x intrinsic")
+    text = text.replace(VECTOR_BINARY_INTRINSICS["vadd"], target)
+    patched = lowered.with_name(f"{safe_slug(op)}-{lowered.name}")
+    patched.write_text(text, encoding="utf-8")
+    return patched, lower_result
+
+
+def run_lowered_case(
+    case_cfg: dict[str, Any],
+    asc_sim: Path,
+    opentileas_repo: Path,
+    build_dir: Path,
+    tmp_dir: Path,
+) -> dict[str, Any]:
+    lowered, lower_result = materialize_lowered_ir(
+        case_cfg,
+        opentileas_repo,
+        build_dir,
         tmp_dir / case_cfg["name"],
     )
-    local_case = generated_vadd_case(
+    local_case = generated_vector_case(
+        case_cfg.get("op", "vadd"),
         int(case_cfg.get("n_elements", case_cfg.get("elements", 1024))),
         int(case_cfg.get("allocated_elements", 1024)),
         int(case_cfg.get("ub_size_bytes", 12288)),
@@ -265,6 +354,16 @@ def run_simulator_case(
     script = opentileas_repo / "simulator" / "scripts" / "ascend_simu.py"
     run_id = safe_slug(f"asc-oracle-{case_cfg['name']}-{int(time.time())}")
     case_dir = materialize_simulator_case(case_cfg, opentileas_repo, tmp_dir)
+    source_flag = "--mlir"
+    source_path = opentileas_repo / case_cfg["mlir"]
+    if case_cfg.get("op", "vadd") != "vadd":
+        source_path, _ = materialize_lowered_ir(
+            case_cfg,
+            opentileas_repo,
+            build_dir,
+            tmp_dir / f"sim-ir-{case_cfg['name']}",
+        )
+        source_flag = "--llvm-ir"
     cmd = [
         sys.executable,
         str(script),
@@ -281,8 +380,8 @@ def run_simulator_case(
         developer,
         "--run-id",
         run_id,
-        "--mlir",
-        str(opentileas_repo / case_cfg["mlir"]),
+        source_flag,
+        str(source_path),
         "--case-dir",
         str(case_dir),
         "--config",
@@ -310,7 +409,7 @@ def run_simulator_case(
 
 def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, tmp_dir: Path) -> Path:
     source = opentileas_repo / case_cfg["case_dir"]
-    if "n_elements" not in case_cfg:
+    if "n_elements" not in case_cfg and case_cfg.get("op", "vadd") == "vadd":
         return source
 
     target = tmp_dir / f"simulator-{safe_slug(case_cfg['name'])}"
@@ -327,10 +426,27 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "import numpy as np",
                 "",
                 "",
+                f"OP = {case_cfg.get('op', 'vadd')!r}",
+                "",
+                "",
+                "def _apply(x: np.ndarray, y: np.ndarray) -> np.ndarray:",
+                "    if OP == 'vadd':",
+                "        return x + y",
+                "    if OP == 'vsub':",
+                "        return x - y",
+                "    if OP == 'vmul':",
+                "        return x * y",
+                "    if OP == 'vmax':",
+                "        return np.maximum(x, y)",
+                "    if OP == 'vmin':",
+                "        return np.minimum(x, y)",
+                "    raise ValueError(f'unsupported op: {OP}')",
+                "",
+                "",
                 "def add(x: np.ndarray, y: np.ndarray, n_elements: int) -> np.ndarray:",
                 "    n = max(0, min(int(n_elements), x.shape[0]))",
                 "    out = np.zeros_like(x, dtype=np.float32)",
-                "    out[:n] = x[:n] + y[:n]",
+                "    out[:n] = _apply(x[:n], y[:n])",
                 "    return out.astype(np.float32)",
                 "",
             ]

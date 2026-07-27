@@ -9,6 +9,57 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "gm_ub_register_vsub_64",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "op": "vsub",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "gm_ub_register_vmul_64",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "op": "vmul",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "gm_ub_register_vdiv_64",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "op": "vdiv",
+      "expect_asc_status": "pass",
+      "case_overrides": {
+        "buffers": {
+          "b": {
+            "values": [
+              100, 100, 100, 100, 100, 100, 100, 100,
+              100, 100, 100, 100, 100, 100, 100, 100,
+              100, 100, 100, 100, 100, 100, 100, 100,
+              100, 100, 100, 100, 100, 100, 100, 100,
+              100, 100, 100, 100, 100, 100, 100, 100,
+              100, 100, 100, 100, 100, 100, 100, 100,
+              100, 100, 100, 100, 100, 100, 100, 100,
+              100, 100, 100, 100, 100, 100, 100, 100
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "gm_ub_register_vmax_64",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "op": "vmax",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "gm_ub_register_vmin_64",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "op": "vmin",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "special_f32_values_64",
       "ir": "../vadd.ll",
       "case": "../vadd.case.json",
@@ -157,6 +208,66 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "opentile_vector_sub_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vsub",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "opentile_vector_mul_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vmul",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "opentile_vector_div_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vdiv",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "opentile_vector_max_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vmax",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "opentile_vector_min_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vmin",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "opentile_vector_add_lowered_n65",
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "n_elements": 65,
@@ -218,6 +329,50 @@
       "config": "runner.json",
       "core": "vec",
       "target": "dav-351x",
+      "n_elements": 64,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_sub_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vsub",
+      "n_elements": 64,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_mul_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vmul",
+      "n_elements": 64,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_max_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vmax",
+      "n_elements": 64,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_min_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vmin",
       "n_elements": 64,
       "expect_simulator_status": "pass"
     },
