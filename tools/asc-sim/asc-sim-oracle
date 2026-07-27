@@ -193,6 +193,14 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vbr.f32.v300",
     "@llvm.hivm.vaddc.v64u32",
     "@llvm.hivm.vaddcs.v64u32",
+    "@llvm.hivm.vcmp.ne.s.z.f16",
+    "@llvm.hivm.vcmp.ne.s.z.f32",
+    "@llvm.hivm.vcmp.ne.s.z.s16",
+    "@llvm.hivm.vcmp.ne.s.z.s32",
+    "@llvm.hivm.vcmp.ne.s.z.s8",
+    "@llvm.hivm.vdups.z.v128f16",
+    "@llvm.hivm.vdups.z.v128i16",
+    "@llvm.hivm.vdups.z.v256i8",
     "@llvm.hivm.vdups.z.v64f32",
     "@llvm.hivm.vdups.z.v64i32",
     "@llvm.hivm.vgatherb.v310.v256s8",
@@ -225,6 +233,9 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vsubcs.v64u32",
     "@llvm.hivm.vsunpack.v128i16",
     "@llvm.hivm.vsunpack.v64i32",
+    "@llvm.hivm.vusqz.m.v128i16",
+    "@llvm.hivm.vusqz.m.v256i8",
+    "@llvm.hivm.vusqz.m.v64i32",
     "@llvm.hivm.vzunpack.v128i16",
     "@llvm.hivm.vzunpack.v64i32",
     "@llvm.hivm.vstar",
@@ -1394,6 +1405,133 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
                     {
                         "buffer": "out",
                         "golden": [byte for segment in segments for byte in segment],
+                        "atol": 0,
+                        "rtol": 0,
+                    }
+                ],
+            }
+        )
+        return
+    if generated == "a5_sqz_rearrange_2048":
+        def le16(value: int) -> list[int]:
+            raw = value & 0xFFFF
+            return [raw & 0xFF, (raw >> 8) & 0xFF]
+
+        def le32(value: int) -> list[int]:
+            raw = value & 0xFFFFFFFF
+            return [
+                raw & 0xFF,
+                (raw >> 8) & 0xFF,
+                (raw >> 16) & 0xFF,
+                (raw >> 24) & 0xFF,
+            ]
+
+        def f16_bits(value: float) -> int:
+            return struct.unpack("<H", struct.pack("<e", f16(value)))[0]
+
+        def f32_bits(value: float) -> int:
+            return struct.unpack("<I", struct.pack("<f", f32(value)))[0]
+
+        def packed_values(values: list[Any], active: list[bool]) -> list[Any]:
+            result = [0] * len(values)
+            out_idx = 0
+            for value, is_active in zip(values, active):
+                if is_active:
+                    result[out_idx] = value
+                    out_idx += 1
+            return result
+
+        def ranks(active: list[bool]) -> list[int]:
+            rank = 0
+            result = []
+            for is_active in active:
+                result.append(rank)
+                if is_active:
+                    rank += 1
+            return result
+
+        i8_values = [((idx * 17) % 127) - 63 for idx in range(256)]
+        i16_values = [((idx * 997) % 60001) - 30000 for idx in range(128)]
+        i32_values = [(idx * 0x1020304 - 0x70000000) for idx in range(64)]
+        f16_values = [f16(-31.5 + idx * 63.0 / 127.0) for idx in range(128)]
+        f32_values = [f32(-1.0e6 + idx * 2.0e6 / 63.0) for idx in range(64)]
+        for values in (i8_values, i16_values, i32_values, f16_values, f32_values):
+            for idx in range(0, len(values), 5):
+                values[idx] = 0
+        f16_values[1] = -0.0
+        f32_values[1] = -0.0
+
+        raw_i8 = [value & 0xFF for value in i8_values]
+        raw_i16_words = [value & 0xFFFF for value in i16_values]
+        raw_i32_words = [value & 0xFFFFFFFF for value in i32_values]
+        raw_f16_words = [f16_bits(value) for value in f16_values]
+        raw_f32_words = [f32_bits(value) for value in f32_values]
+
+        active_i8 = [value != 0 for value in i8_values]
+        active_i16 = [value != 0 for value in i16_values]
+        active_i32 = [value != 0 for value in i32_values]
+        active_f16 = [value != 0.0 for value in f16_values]
+        active_f32 = [value != 0.0 for value in f32_values]
+
+        sqz_i8 = [value & 0xFF for value in packed_values(i8_values, active_i8)]
+        usqz_i8 = [value & 0xFF for value in ranks(active_i8)]
+        sqz_i16 = [byte for value in packed_values(raw_i16_words, active_i16) for byte in le16(value)]
+        usqz_i16 = [byte for value in ranks(active_i16) for byte in le16(value)]
+        sqz_i32 = [byte for value in packed_values(raw_i32_words, active_i32) for byte in le32(value)]
+        usqz_i32 = [byte for value in ranks(active_i32) for byte in le32(value)]
+        sqz_f16 = [byte for value in packed_values(raw_f16_words, active_f16) for byte in le16(value)]
+        sqz_f32 = [byte for value in packed_values(raw_f32_words, active_f32) for byte in le32(value)]
+
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_sqz_rearrange",
+                "arguments": {
+                    "%input_i8": "input_i8",
+                    "%input_i16": "input_i16",
+                    "%input_i32": "input_i32",
+                    "%input_f16": "input_f16",
+                    "%input_f32": "input_f32",
+                    "%out": "out",
+                },
+                "buffers": {
+                    "input_i8": {"space": "gm", "dtype": "u8", "values": raw_i8},
+                    "input_i16": {
+                        "space": "gm",
+                        "dtype": "u8",
+                        "values": [byte for value in raw_i16_words for byte in le16(value)],
+                    },
+                    "input_i32": {
+                        "space": "gm",
+                        "dtype": "u8",
+                        "values": [byte for value in raw_i32_words for byte in le32(value)],
+                    },
+                    "input_f16": {
+                        "space": "gm",
+                        "dtype": "u8",
+                        "values": [byte for value in raw_f16_words for byte in le16(value)],
+                    },
+                    "input_f32": {
+                        "space": "gm",
+                        "dtype": "u8",
+                        "values": [byte for value in raw_f32_words for byte in le32(value)],
+                    },
+                    "out": {"space": "gm", "dtype": "u8", "size": 2048},
+                },
+                "ub_dtypes": ["u8", "u16", "u32", "f16", "f32"],
+                "ub_size_bytes": 5376,
+                "dma_bytes": 256,
+                "checks": [
+                    {
+                        "buffer": "out",
+                        "golden": sqz_i8
+                        + usqz_i8
+                        + sqz_i16
+                        + usqz_i16
+                        + sqz_i32
+                        + usqz_i32
+                        + sqz_f16
+                        + sqz_f32,
                         "atol": 0,
                         "rtol": 0,
                     }

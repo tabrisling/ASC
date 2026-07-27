@@ -390,6 +390,10 @@ def s8(value: int | float) -> int:
     return raw - 0x100 if raw >= 0x80 else raw
 
 
+def u8(value: int | float) -> int:
+    return int(value) & 0xFF
+
+
 def round_dtype(value: Any, dtype: str) -> int | float:
     if dtype == "f32":
         return f32(float(value))
@@ -437,6 +441,12 @@ def f16_to_le_bytes(value: int | float) -> list[int]:
     return u16_to_le_bytes(bits)
 
 
+def f16_bits_to_float(value: int | float) -> float:
+    if isinstance(value, int):
+        return struct.unpack("<e", struct.pack("<H", u16(value)))[0]
+    return f16(float(value))
+
+
 def bf16_to_le_bytes(value: int | float) -> list[int]:
     if isinstance(value, int):
         return u16_to_le_bytes(value)
@@ -451,6 +461,12 @@ def le_bytes_to_u32(values: list[int]) -> int:
     for idx, value in enumerate(values):
         raw |= (int(value) & 0xFF) << (idx * 8)
     return raw
+
+
+def f32_bits_to_float(value: int | float) -> float:
+    if isinstance(value, int):
+        return struct.unpack("<f", struct.pack("<I", u32(value)))[0]
+    return f32(float(value))
 
 
 def le_bytes_to_u16(values: list[int]) -> int:
@@ -1535,12 +1551,63 @@ class DavVAddSim:
             bytes_per_lane = self._stateful_vector_bytes_per_lane(line)
             mask = self._as_mask(args[1], "vsqz mask", lanes=lanes)
             part = self._as_int(args[2], "vsqz part")
-            if part != 1:
-                raise SimError("vsqz stateful-store milestone supports part=1 only")
-            active = self._prefix_active_lanes(mask, lanes, "vsqz")
-            raw = self._serialized_vector_bytes(args[0], line, "vsqz input")
-            self.values[lhs] = PackedBytes(raw[: active * bytes_per_lane])
-            self.trace.append(f"{lhs} = vsqz(active_lanes={active})")
+            if part == 1:
+                active = self._prefix_active_lanes(mask, lanes, "vsqz")
+                raw = self._serialized_vector_bytes(args[0], line, "vsqz input")
+                self.values[lhs] = PackedBytes(raw[: active * bytes_per_lane])
+                self.trace.append(f"{lhs} = vsqz(active_lanes={active})")
+                return
+            if part != 0:
+                raise SimError("vsqz milestone supports part=0 direct vectors and part=1 packed bytes only")
+            if name == "@llvm.hivm.vsqz.x.v256i8":
+                vec = self._as_u8_vector(args[0], "vsqz input", lanes=LANES_I8_V256)
+            elif name in ("@llvm.hivm.vsqz.x.v128i16", "@llvm.hivm.vsqz.x.v128f16"):
+                vec = self._as_vector(args[0], "vsqz input", lanes=LANES_I16_V128)
+            elif name in ("@llvm.hivm.vsqz.x.v64i32", "@llvm.hivm.vsqz.x.v64f32"):
+                vec = self._as_vector(args[0], "vsqz input", lanes=LANES_I32_V64)
+            else:
+                raise SimError(f"{name}: unsupported vsqz vector type")
+            result: list[int | float | None] = [0] * lanes
+            out_idx = 0
+            for idx, active in enumerate(mask):
+                if not active:
+                    continue
+                value = vec[idx]
+                if value is None:
+                    raise SimError(f"vsqz reads inactive/undefined lane {idx}")
+                result[out_idx] = value
+                out_idx += 1
+            self.values[lhs] = result
+            self.trace.append(f"{lhs} = vsqz(part=0, active_lanes={out_idx})")
+            return
+
+        if name in (
+            "@llvm.hivm.vusqz.m.v256i8",
+            "@llvm.hivm.vusqz.m.v128i16",
+            "@llvm.hivm.vusqz.m.v64i32",
+        ):
+            if lhs is None:
+                raise SimError("vusqz result is unused")
+            if len(args) != 2:
+                raise SimError(f"{name}: expected 2 args, got {len(args)}")
+            if name == "@llvm.hivm.vusqz.m.v256i8":
+                lanes = LANES_I8_V256
+                self._as_u8_vector(args[0], "vusqz carrier", lanes=lanes)
+            elif name == "@llvm.hivm.vusqz.m.v128i16":
+                lanes = LANES_I16_V128
+                self._as_u16_vector(args[0], "vusqz carrier", lanes=lanes)
+            else:
+                lanes = LANES_I32_V64
+                self._as_u32_vector(args[0], "vusqz carrier", lanes=lanes)
+            mask = self._as_mask(args[1], "vusqz mask", lanes=lanes)
+            rank = 0
+            result: list[int] = []
+            for active in mask:
+                result.append(rank)
+                if active:
+                    rank += 1
+            self.values[lhs] = result
+            self.trace.append(f"{lhs} = vusqz(active_lanes={rank})")
             return
 
         if name in ("@llvm.hivm.plds.b8", "@llvm.hivm.pldi.b8"):
@@ -1757,6 +1824,97 @@ class DavVAddSim:
                 raise SimError("vdups i32 milestone supports pattern=0 only")
             self.values[lhs] = [u32(scalar) if active else 0 for active in mask]
             self.trace.append(f"{lhs} = vdups.i32({scalar}, {args[1].value}, {pattern})")
+            return
+
+        if name == "@llvm.hivm.vdups.z.v256i8":
+            if lhs is None:
+                raise SimError("vdups result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            scalar = self._as_int(args[0], "vdups i8 scalar")
+            mask = self._as_mask(args[1], "vdups i8 mask", lanes=LANES_I8_V256)
+            pattern = self._as_int(args[2], "vdups i8 pattern")
+            if pattern != 0:
+                raise SimError("vdups i8 milestone supports pattern=0 only")
+            self.values[lhs] = [u8(scalar) if active else 0 for active in mask]
+            self.trace.append(f"{lhs} = vdups.i8({scalar}, {args[1].value}, {pattern})")
+            return
+
+        if name == "@llvm.hivm.vdups.z.v128i16":
+            if lhs is None:
+                raise SimError("vdups result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            scalar = self._as_int(args[0], "vdups i16 scalar")
+            mask = self._as_mask(args[1], "vdups i16 mask", lanes=LANES_I16_V128)
+            pattern = self._as_int(args[2], "vdups i16 pattern")
+            if pattern != 0:
+                raise SimError("vdups i16 milestone supports pattern=0 only")
+            self.values[lhs] = [u16(scalar) if active else 0 for active in mask]
+            self.trace.append(f"{lhs} = vdups.i16({scalar}, {args[1].value}, {pattern})")
+            return
+
+        if name == "@llvm.hivm.vdups.z.v128f16":
+            if lhs is None:
+                raise SimError("vdups result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            scalar = self._as_float(args[0], "vdups f16 scalar")
+            mask = self._as_mask(args[1], "vdups f16 mask", lanes=LANES_F16_V128)
+            pattern = self._as_int(args[2], "vdups f16 pattern")
+            if pattern != 0:
+                raise SimError("vdups f16 milestone supports pattern=0 only")
+            self.values[lhs] = [f16(scalar) if active else 0.0 for active in mask]
+            self.trace.append(f"{lhs} = vdups.f16({scalar}, {args[1].value}, {pattern})")
+            return
+
+        if name in (
+            "@llvm.hivm.vcmp.ne.s.z.s8",
+            "@llvm.hivm.vcmp.ne.s.z.s16",
+            "@llvm.hivm.vcmp.ne.s.z.s32",
+            "@llvm.hivm.vcmp.ne.s.z.f16",
+            "@llvm.hivm.vcmp.ne.s.z.f32",
+        ):
+            if lhs is None:
+                raise SimError("vcmp result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            if name.endswith(".s8"):
+                lanes = LANES_I8_V256
+                left = self._as_u8_vector(args[0], "vcmp lhs", lanes=lanes)
+                right = self._as_u8_vector(args[1], "vcmp rhs", lanes=lanes)
+                cmp = lambda a, b: s8(a) != s8(b)
+            elif name.endswith(".s16"):
+                lanes = LANES_I16_V128
+                left = self._as_u16_vector(args[0], "vcmp lhs", lanes=lanes)
+                right = self._as_u16_vector(args[1], "vcmp rhs", lanes=lanes)
+                cmp = lambda a, b: s16(a) != s16(b)
+            elif name.endswith(".s32"):
+                lanes = LANES_I32_V64
+                left = self._as_u32_vector(args[0], "vcmp lhs", lanes=lanes)
+                right = self._as_u32_vector(args[1], "vcmp rhs", lanes=lanes)
+                cmp = lambda a, b: s32(a) != s32(b)
+            elif name.endswith(".f16"):
+                lanes = LANES_F16_V128
+                left = self._as_vector(args[0], "vcmp lhs", lanes=lanes)
+                right = self._as_vector(args[1], "vcmp rhs", lanes=lanes)
+                cmp = lambda a, b: f16_bits_to_float(a) != f16_bits_to_float(b)
+            else:
+                lanes = LANES_F32_V64
+                left = self._as_vector(args[0], "vcmp lhs", lanes=lanes)
+                right = self._as_vector(args[1], "vcmp rhs", lanes=lanes)
+                cmp = lambda a, b: f32_bits_to_float(a) != f32_bits_to_float(b)
+            mask = self._as_mask(args[2], "vcmp mask", lanes=lanes)
+            pred: list[bool] = []
+            for idx, active in enumerate(mask):
+                if not active:
+                    pred.append(False)
+                    continue
+                if left[idx] is None or right[idx] is None:
+                    raise SimError(f"vcmp reads inactive/undefined lane {idx}")
+                pred.append(bool(cmp(left[idx], right[idx])))
+            self.values[lhs] = pred + [False] * (256 - lanes)
+            self.trace.append(f"{lhs} = vcmp.ne({args[0].value}, {args[1].value})")
             return
 
         if name in (

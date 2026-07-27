@@ -637,6 +637,53 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "gm_ub_register_a5_sqz_rearrange_2048",
+      "ir": "../sqz_rearrange.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.pset.b8",
+        "@llvm.hivm.pset.b16",
+        "@llvm.hivm.pset.b32",
+        "@llvm.hivm.vcmp.ne.s.z.f16",
+        "@llvm.hivm.vcmp.ne.s.z.f32",
+        "@llvm.hivm.vcmp.ne.s.z.s16",
+        "@llvm.hivm.vcmp.ne.s.z.s32",
+        "@llvm.hivm.vcmp.ne.s.z.s8",
+        "@llvm.hivm.vdups.z.v128f16",
+        "@llvm.hivm.vdups.z.v128i16",
+        "@llvm.hivm.vdups.z.v256i8",
+        "@llvm.hivm.vdups.z.v64f32",
+        "@llvm.hivm.vdups.z.v64i32",
+        "@llvm.hivm.vldsx1.v128f16",
+        "@llvm.hivm.vldsx1.v128s16",
+        "@llvm.hivm.vldsx1.v256s8",
+        "@llvm.hivm.vldsx1.v64f32",
+        "@llvm.hivm.vldsx1.v64s32",
+        "@llvm.hivm.vsqz.x.v128f16",
+        "@llvm.hivm.vsqz.x.v128i16",
+        "@llvm.hivm.vsqz.x.v256i8",
+        "@llvm.hivm.vsqz.x.v64f32",
+        "@llvm.hivm.vsqz.x.v64i32",
+        "@llvm.hivm.vstsx1.v128f16",
+        "@llvm.hivm.vstsx1.v128s16",
+        "@llvm.hivm.vstsx1.v256s8",
+        "@llvm.hivm.vstsx1.v64f32",
+        "@llvm.hivm.vstsx1.v64s32",
+        "@llvm.hivm.vusqz.m.v128i16",
+        "@llvm.hivm.vusqz.m.v256i8",
+        "@llvm.hivm.vusqz.m.v64i32"
+      ],
+      "generated": "a5_sqz_rearrange_2048",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "gm_ub_register_a5_predicate_widths_256",
       "ir": "../predicate_widths.ll",
       "case": "../vadd.case.json",
@@ -2596,7 +2643,7 @@
       "core": "vec",
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "static_unsupported",
+      "expect_asc_status": "pass",
       "expect_simulator_status": "pass",
       "intrinsics": [
         "@llvm.hivm.BARRIER",
@@ -2635,7 +2682,8 @@
         "@llvm.hivm.vusqz.m.v128i16",
         "@llvm.hivm.vusqz.m.v256i8",
         "@llvm.hivm.vusqz.m.v64i32"
-      ]
+      ],
+      "require_simulator": false
     },
     {
       "name": "opentile_a5_unaligned_load_state",
