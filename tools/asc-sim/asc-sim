@@ -1037,7 +1037,7 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = vsldb.i8(UB, byte_offset={base_byte + MEMORY_BLOCK_BYTES})")
             return
 
-        if name == "@llvm.hivm.vgatherb.v310.v256s8":
+        if name in ("@llvm.hivm.vgatherb.v310.v256s8", "@llvm.hivm.vgatherb.v310.v256u8"):
             if lhs is None:
                 raise SimError("vgatherb result is unused")
             if len(args) != 3:
@@ -1048,7 +1048,7 @@ class DavVAddSim:
             offsets = self._as_u32_vector(args[1], "vgatherb offsets")
             mask = self._as_mask(args[2], "vgatherb mask", lanes=LANES_I8_V256)
             if not all(mask):
-                raise SimError("vgatherb i8 milestone supports full b8 mask only")
+                raise SimError("vgatherb byte milestone supports full b8 mask only")
             gathered: list[int] = []
             for block_idx in range(MEMORY_BLOCK_COUNT):
                 raw_offset = offsets[block_idx]
@@ -1056,7 +1056,7 @@ class DavVAddSim:
                     raise SimError(f"vgatherb reads inactive offset lane {block_idx}")
                 byte_offset = int(raw_offset)
                 if byte_offset < 0:
-                    raise SimError("vgatherb i8 milestone rejects negative offsets")
+                    raise SimError("vgatherb byte milestone rejects negative offsets")
                 start = self._check_region(
                     buf,
                     base_byte + byte_offset,
@@ -1066,10 +1066,10 @@ class DavVAddSim:
                 )
                 gathered.extend(int(x) & 0xFF for x in buf.values[start : start + MEMORY_BLOCK_BYTES])
             self.values[lhs] = gathered
-            self.trace.append(f"{lhs} = vgatherb.i8(UB, byte_offset={base_byte})")
+            self.trace.append(f"{lhs} = vgatherb.byte(UB, byte_offset={base_byte})")
             return
 
-        if name == "@llvm.hivm.vgatherb.v310.v128s16":
+        if name in ("@llvm.hivm.vgatherb.v310.v128s16", "@llvm.hivm.vgatherb.v310.v128u16"):
             if lhs is None:
                 raise SimError("vgatherb result is unused")
             if len(args) != 3:
@@ -1080,7 +1080,7 @@ class DavVAddSim:
             offsets = self._as_u32_vector(args[1], "vgatherb offsets")
             mask = self._as_mask(args[2], "vgatherb mask", lanes=LANES_I16_V128)
             if not all(mask):
-                raise SimError("vgatherb i16 milestone supports full b16 mask only")
+                raise SimError("vgatherb i16/u16 milestone supports full b16 mask only")
             gathered_bytes: list[int] = []
             for block_idx in range(MEMORY_BLOCK_COUNT):
                 raw_offset = offsets[block_idx]
@@ -1088,7 +1088,7 @@ class DavVAddSim:
                     raise SimError(f"vgatherb reads inactive offset lane {block_idx}")
                 byte_offset = int(raw_offset)
                 if byte_offset < 0:
-                    raise SimError("vgatherb i16 milestone rejects negative offsets")
+                    raise SimError("vgatherb i16/u16 milestone rejects negative offsets")
                 gathered_bytes.extend(
                     self._read_ub_bytes(
                         buf,
@@ -1098,10 +1098,10 @@ class DavVAddSim:
                     )
                 )
             self.values[lhs] = pack_u16_words_from_bytes(gathered_bytes)
-            self.trace.append(f"{lhs} = vgatherb.i16(UB, byte_offset={base_byte})")
+            self.trace.append(f"{lhs} = vgatherb.i16/u16(UB, byte_offset={base_byte})")
             return
 
-        if name == "@llvm.hivm.vgatherb.v310.v64s32":
+        if name in ("@llvm.hivm.vgatherb.v310.v64s32", "@llvm.hivm.vgatherb.v310.v64u32"):
             if lhs is None:
                 raise SimError("vgatherb result is unused")
             if len(args) != 3:
@@ -1112,7 +1112,7 @@ class DavVAddSim:
             offsets = self._as_u32_vector(args[1], "vgatherb offsets")
             mask = self._as_mask(args[2], "vgatherb mask", lanes=LANES_I32_V64)
             if not all(mask):
-                raise SimError("vgatherb i32 milestone supports full b32 mask only")
+                raise SimError("vgatherb i32/u32 milestone supports full b32 mask only")
             gathered_bytes: list[int] = []
             for block_idx in range(MEMORY_BLOCK_COUNT):
                 raw_offset = offsets[block_idx]
@@ -1120,7 +1120,7 @@ class DavVAddSim:
                     raise SimError(f"vgatherb reads inactive offset lane {block_idx}")
                 byte_offset = int(raw_offset)
                 if byte_offset < 0:
-                    raise SimError("vgatherb i32 milestone rejects negative offsets")
+                    raise SimError("vgatherb i32/u32 milestone rejects negative offsets")
                 gathered_bytes.extend(
                     self._read_ub_bytes(
                         buf,
@@ -1130,7 +1130,7 @@ class DavVAddSim:
                     )
                 )
             self.values[lhs] = pack_u32_words_from_bytes(gathered_bytes)
-            self.trace.append(f"{lhs} = vgatherb.i32(UB, byte_offset={base_byte})")
+            self.trace.append(f"{lhs} = vgatherb.i32/u32(UB, byte_offset={base_byte})")
             return
 
         if name == "@llvm.hivm.vldsx1.v128f16":

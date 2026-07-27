@@ -1,0 +1,56 @@
+; Minimal dav unsigned vgatherb LLVM IR smoke test for tools/asc-sim.
+;
+; This mirrors OpenTileAS simulator/cases/a5_vgatherb_unsigned: the same eight
+; 32B byte blocks are gathered through u8, u16, and u32 intrinsic suffixes,
+; stored back to UB, then copied to GM as a contiguous 768B byte payload.
+
+define dso_local ptc_kernel void @dav_vgatherb_unsigned(ptr addrspace(1) %data,
+                                                        ptr addrspace(1) %offsets,
+                                                        ptr addrspace(1) %out) #0 {
+entry:
+  call void @llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV(ptr addrspace(6) null, ptr addrspace(1) %data, i64 288230377225453824, i64 35184372088864)
+  call void @llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV(ptr addrspace(6) inttoptr (i64 512 to ptr addrspace(6)), ptr addrspace(1) %offsets, i64 288230377225453696, i64 35184372088864)
+  call void @llvm.hivm.SET.FLAG.IMM(i64 4, i64 1, i64 0)
+  call void @llvm.hivm.WAIT.FLAG.IMM(i64 4, i64 1, i64 0)
+  %mask8 = call <256 x i1> @llvm.hivm.pset.b8(i32 0)
+  %mask16 = call <256 x i1> @llvm.hivm.pset.b16(i32 0)
+  %mask32 = call <256 x i1> @llvm.hivm.pset.b32(i32 0)
+  %idx = call <64 x i32> @llvm.hivm.vldsx1.v64s32(ptr addrspace(6) inttoptr (i64 512 to ptr addrspace(6)), i32 0, i32 0, i32 0)
+  %gather8 = call <256 x i8> @llvm.hivm.vgatherb.v310.v256u8(ptr addrspace(6) null, <64 x i32> %idx, <256 x i1> %mask8)
+  %gather16 = call <128 x i16> @llvm.hivm.vgatherb.v310.v128u16(ptr addrspace(6) null, <64 x i32> %idx, <256 x i1> %mask16)
+  %gather32 = call <64 x i32> @llvm.hivm.vgatherb.v310.v64u32(ptr addrspace(6) null, <64 x i32> %idx, <256 x i1> %mask32)
+  call void @llvm.hivm.vstsx1.v256s8(<256 x i8> %gather8, ptr addrspace(6) inttoptr (i64 1024 to ptr addrspace(6)), i32 0, i32 2, i32 0, <256 x i1> %mask8)
+  call void @llvm.hivm.vstsx1.v128s16(<128 x i16> %gather16, ptr addrspace(6) inttoptr (i64 1280 to ptr addrspace(6)), i32 0, i32 2, i32 0, <256 x i1> %mask16)
+  call void @llvm.hivm.vstsx1.v64s32(<64 x i32> %gather32, ptr addrspace(6) inttoptr (i64 1536 to ptr addrspace(6)), i32 0, i32 2, i32 0, <256 x i1> %mask32)
+  call void @llvm.hivm.SET.FLAG.IMM(i64 1, i64 5, i64 0)
+  call void @llvm.hivm.WAIT.FLAG.IMM(i64 1, i64 5, i64 0)
+  call void @llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV(ptr addrspace(1) %out, ptr addrspace(6) inttoptr (i64 1024 to ptr addrspace(6)), i64 288230377225453952, i64 35184372088864)
+  call void @llvm.hivm.BARRIER(i64 6)
+  ret void
+}
+
+declare <256 x i1> @llvm.hivm.pset.b8(i32)
+declare <256 x i1> @llvm.hivm.pset.b16(i32)
+declare <256 x i1> @llvm.hivm.pset.b32(i32)
+declare <64 x i32> @llvm.hivm.vldsx1.v64s32(ptr addrspace(6), i32, i32, i32)
+declare <256 x i8> @llvm.hivm.vgatherb.v310.v256u8(ptr addrspace(6), <64 x i32>, <256 x i1>)
+declare <128 x i16> @llvm.hivm.vgatherb.v310.v128u16(ptr addrspace(6), <64 x i32>, <256 x i1>)
+declare <64 x i32> @llvm.hivm.vgatherb.v310.v64u32(ptr addrspace(6), <64 x i32>, <256 x i1>)
+declare void @llvm.hivm.vstsx1.v256s8(<256 x i8>, ptr addrspace(6), i32, i32, i32, <256 x i1>)
+declare void @llvm.hivm.vstsx1.v128s16(<128 x i16>, ptr addrspace(6), i32, i32, i32, <256 x i1>)
+declare void @llvm.hivm.vstsx1.v64s32(<64 x i32>, ptr addrspace(6), i32, i32, i32, <256 x i1>)
+declare void @llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV(ptr addrspace(6), ptr addrspace(1), i64, i64)
+declare void @llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV(ptr addrspace(6), ptr addrspace(1), i64, i64)
+declare void @llvm.hivm.SET.FLAG.IMM(i64, i64, i64)
+declare void @llvm.hivm.WAIT.FLAG.IMM(i64, i64, i64)
+declare void @llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV(ptr addrspace(1), ptr addrspace(6), i64, i64)
+declare void @llvm.hivm.BARRIER(i64)
+
+attributes #0 = { "target-cpu"="dav-c310-vec" }
+
+!llvm.module.flags = !{!0}
+!hivm.annotations = !{!1}
+!nvvm.annotations = !{}
+
+!0 = !{i32 2, !"Debug Info Version", i32 3}
+!1 = !{ptr @dav_vgatherb_unsigned, !"kernel", i32 1}
