@@ -17,7 +17,7 @@ import struct
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 LANES_F32_V64 = 64
@@ -38,6 +38,22 @@ BINARY_VECTOR_OPS = {
     "@llvm.hivm.vmin.s.x.v64f32": ("vmin", lambda a, b: f32(min(a, b))),
 }
 
+UNARY_VECTOR_OPS = {
+    "@llvm.hivm.vabs.x.v64f32": ("vabs", lambda a: f32(abs(a))),
+    "@llvm.hivm.vneg.x.v64f32": ("vneg", lambda a: f32(-a)),
+    "@llvm.hivm.vrelu.x.v64f32": ("vrelu", lambda a: f32(max(a, 0.0))),
+    "@llvm.hivm.vsqrt.x.v64f32": ("vsqrt", lambda a: f32_sqrt(a)),
+    "@llvm.hivm.vrec.x.v64f32": ("vrec", lambda a: f32_div(1.0, a)),
+    "@llvm.hivm.vexp.x.v64f32": ("vexp", lambda a: f32_exp(a)),
+}
+
+SCALAR_VECTOR_OPS = {
+    "@llvm.hivm.vadds.s.x.v64f32": ("vadds", lambda a, s: f32(a + s)),
+    "@llvm.hivm.vmuls.s.x.v64f32": ("vmuls", lambda a, s: f32(a * s)),
+    "@llvm.hivm.vmaxs.s.x.v64f32": ("vmaxs", lambda a, s: f32(max(a, s))),
+    "@llvm.hivm.vmins.s.x.v64f32": ("vmins", lambda a, s: f32(min(a, s))),
+}
+
 
 class SimError(RuntimeError):
     pass
@@ -53,7 +69,7 @@ class Buffer:
 
 @dataclass
 class TypedValue:
-    value: str | int
+    value: str | int | float
     addrspace: int | None = None
 
 
@@ -101,6 +117,21 @@ def parse_typed_value(text: str) -> TypedValue:
 
     if "null" in text and addrspace is not None:
         return TypedValue(0, addrspace)
+
+    m_float = re.search(
+        r"(?:float|double)\s+([+-]?(?:nan|inf|infinity|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?))\s*$",
+        text,
+        re.I,
+    )
+    if m_float:
+        token = m_float.group(1).lower()
+        if token == "nan":
+            return TypedValue(float("nan"), addrspace)
+        if token in ("inf", "+inf", "infinity", "+infinity"):
+            return TypedValue(float("inf"), addrspace)
+        if token in ("-inf", "-infinity"):
+            return TypedValue(float("-inf"), addrspace)
+        return TypedValue(float(token), addrspace)
 
     m_inttoptr = re.search(r"inttoptr\s*\(\s*i64\s+(-?\d+)\s+to\s+ptr", text)
     if m_inttoptr:
@@ -179,6 +210,23 @@ def f32_div(a: float, b: float) -> float:
             return float("nan")
         return math.copysign(float("inf"), a * b)
     return f32(a / b)
+
+
+def f32_sqrt(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    if value < 0.0:
+        return float("nan")
+    return f32(math.sqrt(value))
+
+
+def f32_exp(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    try:
+        return f32(math.exp(value))
+    except OverflowError:
+        return float("inf")
 
 
 def pattern_to_mask(pattern: int) -> list[bool]:
@@ -537,6 +585,47 @@ class DavVAddSim:
             )
             return
 
+        if name in UNARY_VECTOR_OPS:
+            if lhs is None:
+                raise SimError(f"{UNARY_VECTOR_OPS[name][0]} result is unused")
+            if len(args) != 2:
+                raise SimError(f"{name}: expected 2 args, got {len(args)}")
+            op_label, op = UNARY_VECTOR_OPS[name]
+            vec = self._as_vector(args[0], f"{op_label} input")
+            mask = self._as_mask(args[1], f"{op_label} mask")
+            self.values[lhs] = self._map_unary_vector(vec, mask, op)
+            self.trace.append(f"{lhs} = {op_label}({args[0].value}, {args[1].value})")
+            return
+
+        if name in SCALAR_VECTOR_OPS:
+            if lhs is None:
+                raise SimError(f"{SCALAR_VECTOR_OPS[name][0]} result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            op_label, op = SCALAR_VECTOR_OPS[name]
+            vec = self._as_vector(args[0], f"{op_label} input")
+            scalar = self._as_float(args[1], f"{op_label} scalar")
+            mask = self._as_mask(args[2], f"{op_label} mask")
+            self.values[lhs] = self._map_scalar_vector(vec, scalar, mask, op)
+            self.trace.append(
+                f"{lhs} = {op_label}({args[0].value}, {scalar}, {args[2].value})"
+            )
+            return
+
+        if name == "@llvm.hivm.vdups.z.v64f32":
+            if lhs is None:
+                raise SimError("vdups result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            scalar = self._as_float(args[0], "vdups scalar")
+            mask = self._as_mask(args[1], "vdups mask")
+            pattern = self._as_int(args[2], "vdups pattern")
+            if pattern != 0:
+                raise SimError("vdups milestone supports pattern=0 only")
+            self.values[lhs] = [f32(scalar) if active else 0.0 for active in mask]
+            self.trace.append(f"{lhs} = vdups({scalar}, {args[1].value}, {pattern})")
+            return
+
         if name == "@llvm.hivm.vstsx1.v64f32":
             if len(args) != 6:
                 raise SimError(f"{name}: expected 6 args, got {len(args)}")
@@ -560,6 +649,29 @@ class DavVAddSim:
             return
 
         self.unsupported.append(name)
+
+    def _map_unary_vector(
+        self,
+        vec: list[float | None],
+        mask: list[bool],
+        op: Callable[[float], float],
+    ) -> list[float | None]:
+        result: list[float | None] = []
+        for idx, active in enumerate(mask):
+            result.append(op(float(vec[idx])) if active else None)
+        return result
+
+    def _map_scalar_vector(
+        self,
+        vec: list[float | None],
+        scalar: float,
+        mask: list[bool],
+        op: Callable[[float, float], float],
+    ) -> list[float | None]:
+        result: list[float | None] = []
+        for idx, active in enumerate(mask):
+            result.append(op(float(vec[idx]), scalar) if active else None)
+        return result
 
     def _execute_scalar_or_pointer_line(self, line: str) -> bool:
         ptrtoint = re.match(
@@ -667,13 +779,15 @@ class DavVAddSim:
             return left << right
         raise SimError(f"{lhs}: unsupported binary op {op}")
 
-    def _read_scalar_or_pointer(self, value: TypedValue) -> int | bool | PointerValue:
+    def _read_scalar_or_pointer(self, value: TypedValue) -> int | float | bool | PointerValue:
         if isinstance(value.value, int):
+            return value.value
+        if isinstance(value.value, float):
             return value.value
         if value.value not in self.values:
             raise SimError(f"unknown SSA value {value.value}")
         bound = self.values[value.value]
-        if isinstance(bound, (int, bool, PointerValue)):
+        if isinstance(bound, (int, float, bool, PointerValue)):
             return bound
         raise SimError(f"{value.value}: expected scalar or pointer, got vector/mask")
 
@@ -684,6 +798,14 @@ class DavVAddSim:
         if isinstance(bound, int):
             return bound
         raise SimError(f"{label}: expected integer, got {value.value}")
+
+    def _as_float(self, value: TypedValue, label: str) -> float:
+        if isinstance(value.value, (int, float)):
+            return f32(float(value.value))
+        bound = self.values.get(value.value)
+        if isinstance(bound, (int, float)):
+            return f32(float(bound))
+        raise SimError(f"{label}: expected float, got {value.value}")
 
     def _as_bool(self, value: TypedValue, label: str) -> bool:
         if isinstance(value.value, int):

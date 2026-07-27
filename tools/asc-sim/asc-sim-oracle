@@ -28,6 +28,26 @@ VECTOR_BINARY_INTRINSICS = {
     "vmin": "@llvm.hivm.vmin.s.x.v64f32",
 }
 
+VECTOR_UNARY_INTRINSICS = {
+    "vabs": "@llvm.hivm.vabs.x.v64f32",
+    "vneg": "@llvm.hivm.vneg.x.v64f32",
+    "vrelu": "@llvm.hivm.vrelu.x.v64f32",
+    "vsqrt": "@llvm.hivm.vsqrt.x.v64f32",
+    "vrec": "@llvm.hivm.vrec.x.v64f32",
+    "vexp": "@llvm.hivm.vexp.x.v64f32",
+}
+
+VECTOR_SCALAR_INTRINSICS = {
+    "vadds": "@llvm.hivm.vadds.s.x.v64f32",
+    "vmuls": "@llvm.hivm.vmuls.s.x.v64f32",
+    "vmaxs": "@llvm.hivm.vmaxs.s.x.v64f32",
+    "vmins": "@llvm.hivm.vmins.s.x.v64f32",
+}
+
+VECTOR_DUP_INTRINSICS = {
+    "vdups": "@llvm.hivm.vdups.z.v64f32",
+}
+
 
 def load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
@@ -92,9 +112,12 @@ def run_asc_ir_case(
         apply_generated_asc_case(case_json, generated)
     op = case_cfg.get("op")
     if op and op != "vadd":
-        replace_handwritten_binary_op(case_cfg["name"], op, ir_text)
-        ir_text = ir_text.replace("@llvm.hivm.vadd.v64f32.x", local_intrinsic_for(op))
-        apply_binary_op_case(case_json, op)
+        ir_text = patch_vector_compute_ir(case_cfg["name"], ir_text, op, lowered=False)
+        apply_vector_op_case(
+            case_json,
+            op,
+            float(case_cfg.get("scalar", case_cfg_scalar_default(op))),
+        )
 
     work_ir = tmp_dir / f"{case_cfg['name']}.ll"
     work_case = tmp_dir / f"{case_cfg['name']}.case.json"
@@ -123,12 +146,12 @@ def generated_vector_case(
     ub_size_bytes: int,
     dma_bytes: int,
 ) -> dict[str, Any]:
-    x = [float(i) * 0.5 for i in range(allocated_elements)]
-    y = [7.0 - float(i) * 0.25 for i in range(allocated_elements)]
+    x, y = generated_inputs(op, allocated_elements)
+    scalar = float(case_cfg_scalar_default(op))
     active = max(0, min(n_elements, allocated_elements))
     golden = [0.0] * allocated_elements
     for idx in range(active):
-        golden[idx] = eval_binary_op(op, x[idx], y[idx])
+        golden[idx] = eval_vector_op(op, x[idx], y[idx], scalar)
     return {
         "entry": "add_kernel",
         "arguments": {"%0": "x", "%1": "y", "%2": "output"},
@@ -163,7 +186,45 @@ def f32_div(a: float, b: float) -> float:
     return f32(a / b)
 
 
-def eval_binary_op(op: str, a: float, b: float) -> float:
+def f32_sqrt(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    if value < 0.0:
+        return float("nan")
+    return f32(math.sqrt(value))
+
+
+def f32_exp(value: float) -> float:
+    if math.isnan(value):
+        return float("nan")
+    try:
+        return f32(math.exp(value))
+    except OverflowError:
+        return float("inf")
+
+
+def case_cfg_scalar_default(op: str) -> float:
+    if op == "vdups":
+        return 3.5
+    if op in VECTOR_SCALAR_INTRINSICS:
+        return 2.0
+    return 0.0
+
+
+def generated_inputs(op: str, allocated_elements: int) -> tuple[list[float], list[float]]:
+    if op in ("vsqrt", "vrec"):
+        x = [1.0 + float(i) * 0.125 for i in range(allocated_elements)]
+    elif op == "vexp":
+        x = [float((i % 17) - 8) * 0.125 for i in range(allocated_elements)]
+    else:
+        x = [float(i) * 0.5 for i in range(allocated_elements)]
+    y = [7.0 - float(i) * 0.25 for i in range(allocated_elements)]
+    if op == "vdiv":
+        y = [1.0 + float(i % 31) * 0.25 for i in range(allocated_elements)]
+    return x, y
+
+
+def eval_vector_op(op: str, a: float, b: float, scalar: float) -> float:
     if op == "vadd":
         return f32(a + b)
     if op == "vsub":
@@ -176,26 +237,90 @@ def eval_binary_op(op: str, a: float, b: float) -> float:
         return f32(max(a, b))
     if op == "vmin":
         return f32(min(a, b))
+    if op == "vabs":
+        return f32(abs(a))
+    if op == "vneg":
+        return f32(-a)
+    if op == "vrelu":
+        return f32(max(a, 0.0))
+    if op == "vsqrt":
+        return f32_sqrt(a)
+    if op == "vrec":
+        return f32_div(1.0, a)
+    if op == "vexp":
+        return f32_exp(a)
+    if op == "vadds":
+        return f32(a + scalar)
+    if op == "vmuls":
+        return f32(a * scalar)
+    if op == "vmaxs":
+        return f32(max(a, scalar))
+    if op == "vmins":
+        return f32(min(a, scalar))
+    if op == "vdups":
+        return f32(scalar)
     raise RuntimeError(f"unsupported vector op: {op}")
 
 
-def local_intrinsic_for(op: str) -> str:
-    if op not in VECTOR_BINARY_INTRINSICS:
-        raise RuntimeError(f"unsupported local vector op: {op}")
-    return VECTOR_BINARY_INTRINSICS[op]
-
-
-def replace_handwritten_binary_op(case_name: str, op: str, ir_text: str) -> None:
-    if "@llvm.hivm.vadd.v64f32.x" not in ir_text:
-        raise RuntimeError(f"{case_name}: handwritten vadd intrinsic not found")
-    if op not in VECTOR_BINARY_INTRINSICS:
-        raise RuntimeError(f"{case_name}: unsupported op {op}")
-
-
-def apply_binary_op_case(case_json: dict[str, Any], op: str) -> None:
+def apply_vector_op_case(case_json: dict[str, Any], op: str, scalar: float) -> None:
     a = [float(x) for x in case_json["buffers"]["a"]["values"]]
     b = [float(x) for x in case_json["buffers"]["b"]["values"]]
-    case_json["checks"][0]["golden"] = [eval_binary_op(op, x, y) for x, y in zip(a, b)]
+    case_json["checks"][0]["golden"] = [eval_vector_op(op, x, y, scalar) for x, y in zip(a, b)]
+
+
+def op_intrinsic(op: str) -> str:
+    for table in (VECTOR_BINARY_INTRINSICS, VECTOR_UNARY_INTRINSICS, VECTOR_SCALAR_INTRINSICS, VECTOR_DUP_INTRINSICS):
+        if op in table:
+            return table[op]
+    raise RuntimeError(f"unsupported vector op: {op}")
+
+
+def patch_vector_compute_ir(case_name: str, ir_text: str, op: str, lowered: bool) -> str:
+    if op == "vadd":
+        return ir_text
+    source = VECTOR_BINARY_INTRINSICS["vadd"] if lowered else "@llvm.hivm.vadd.v64f32.x"
+    target = op_intrinsic(op)
+    call_pattern = re.compile(
+        rf"(?P<lhs>%[-A-Za-z0-9_.$]+)\s*=\s*call\s+<64 x float>\s+{re.escape(source)}"
+        r"\(<64 x float>\s+(?P<a>%[-A-Za-z0-9_.$]+),\s+<64 x float>\s+(?P<b>%[-A-Za-z0-9_.$]+),\s+<256 x i1>\s+(?P<mask>%[-A-Za-z0-9_.$]+)\)"
+    )
+
+    def replace_call(match: re.Match[str]) -> str:
+        lhs = match.group("lhs")
+        a = match.group("a")
+        b = match.group("b")
+        mask = match.group("mask")
+        if op in VECTOR_BINARY_INTRINSICS:
+            return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <64 x float> {b}, <256 x i1> {mask})"
+        if op in VECTOR_UNARY_INTRINSICS:
+            return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <256 x i1> {mask})"
+        if op in VECTOR_SCALAR_INTRINSICS:
+            return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, float 2.0, <256 x i1> {mask})"
+        if op in VECTOR_DUP_INTRINSICS:
+            return f"{lhs} = call <64 x float> {target}(float 3.5, <256 x i1> {mask}, i32 0)"
+        raise RuntimeError(f"{case_name}: unsupported op {op}")
+
+    patched, count = call_pattern.subn(replace_call, ir_text)
+    if count != 1:
+        raise RuntimeError(f"{case_name}: expected one vector compute call to patch, found {count}")
+
+    declare_source = (
+        f"declare <64 x float> {source}(<64 x float>, <64 x float>, <256 x i1>)"
+    )
+    if op in VECTOR_BINARY_INTRINSICS:
+        declare_target = f"declare <64 x float> {target}(<64 x float>, <64 x float>, <256 x i1>)"
+    elif op in VECTOR_UNARY_INTRINSICS:
+        declare_target = f"declare <64 x float> {target}(<64 x float>, <256 x i1>)"
+    elif op in VECTOR_SCALAR_INTRINSICS:
+        declare_target = f"declare <64 x float> {target}(<64 x float>, float, <256 x i1>)"
+    elif op in VECTOR_DUP_INTRINSICS:
+        declare_target = f"declare <64 x float> {target}(float, <256 x i1>, i32)"
+    else:
+        raise RuntimeError(f"{case_name}: unsupported op {op}")
+
+    if declare_source not in patched:
+        raise RuntimeError(f"{case_name}: source declaration not found")
+    return patched.replace(declare_source, declare_target, 1)
 
 
 def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
@@ -232,7 +357,7 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
     else:
         raise RuntimeError(f"unknown generated ASC case: {generated}")
 
-    golden = [eval_binary_op("vadd", float(x), float(y)) for x, y in zip(a, b)]
+    golden = [eval_vector_op("vadd", float(x), float(y), 0.0) for x, y in zip(a, b)]
     case_json["buffers"]["a"]["values"] = a
     case_json["buffers"]["b"]["values"] = b
     case_json["checks"][0]["golden"] = golden
@@ -291,13 +416,8 @@ def materialize_lowered_ir(
     op = case_cfg.get("op", "vadd")
     if op == "vadd":
         return lowered, lower_result
-    if op not in VECTOR_BINARY_INTRINSICS:
-        raise RuntimeError(f"unsupported lowered vector op: {op}")
     text = lowered.read_text(encoding="utf-8")
-    target = VECTOR_BINARY_INTRINSICS[op]
-    if VECTOR_BINARY_INTRINSICS["vadd"] not in text:
-        raise RuntimeError("lowered vector_add IR does not contain vadd.s.x intrinsic")
-    text = text.replace(VECTOR_BINARY_INTRINSICS["vadd"], target)
+    text = patch_vector_compute_ir(case_cfg["name"], text, op, lowered=True)
     patched = lowered.with_name(f"{safe_slug(op)}-{lowered.name}")
     patched.write_text(text, encoding="utf-8")
     return patched, lower_result
@@ -427,6 +547,7 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "",
                 "",
                 f"OP = {case_cfg.get('op', 'vadd')!r}",
+                "SCALAR = 2.0 if OP != 'vdups' else 3.5",
                 "",
                 "",
                 "def _apply(x: np.ndarray, y: np.ndarray) -> np.ndarray:",
@@ -440,6 +561,28 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "        return np.maximum(x, y)",
                 "    if OP == 'vmin':",
                 "        return np.minimum(x, y)",
+                "    if OP == 'vabs':",
+                "        return np.abs(x)",
+                "    if OP == 'vneg':",
+                "        return -x",
+                "    if OP == 'vrelu':",
+                "        return np.maximum(x, np.float32(0.0))",
+                "    if OP == 'vsqrt':",
+                "        return np.sqrt(x)",
+                "    if OP == 'vrec':",
+                "        return np.float32(1.0) / x",
+                "    if OP == 'vexp':",
+                "        return np.exp(x)",
+                "    if OP == 'vadds':",
+                "        return x + np.float32(SCALAR)",
+                "    if OP == 'vmuls':",
+                "        return x * np.float32(SCALAR)",
+                "    if OP == 'vmaxs':",
+                "        return np.maximum(x, np.float32(SCALAR))",
+                "    if OP == 'vmins':",
+                "        return np.minimum(x, np.float32(SCALAR))",
+                "    if OP == 'vdups':",
+                "        return np.full_like(x, np.float32(SCALAR), dtype=np.float32)",
                 "    raise ValueError(f'unsupported op: {OP}')",
                 "",
                 "",

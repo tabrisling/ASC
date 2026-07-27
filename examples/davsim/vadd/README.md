@@ -23,8 +23,11 @@ timing or pipeline scheduling.
 
 Run the oracle suite to exercise local negative cases and an OpenTileAS
 vector_add kernel after real dav-351x lowering. The suite also reuses the same
-GM/UB/register data path to check the first batch of f32 vector compute ops:
-`vadd`, `vsub`, `vmul`, `vdiv`, `vmax`, and `vmin`.
+GM/UB/register data path to check the first batches of f32 vector compute ops:
+`vadd`, `vsub`, `vmul`, `vdiv`, `vmax`, `vmin`, `vabs`, `vneg`, `vrelu`,
+`vsqrt`, `vrec`, `vexp`, `vadds`, `vmuls`, `vmaxs`, `vmins`, and `vdups`.
+Reduction and select-style intrinsics such as `vcadd` and `vsel` are not
+modeled yet.
 
 ```bash
 build/bin/asc-sim-oracle
