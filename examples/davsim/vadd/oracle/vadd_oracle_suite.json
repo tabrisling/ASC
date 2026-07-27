@@ -611,6 +611,32 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "gm_ub_register_a5_unpack_integer_2048",
+      "ir": "../unpack_integer.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s8.DV",
+        "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
+        "@llvm.hivm.SET.FLAG.IMM",
+        "@llvm.hivm.WAIT.FLAG.IMM",
+        "@llvm.hivm.BARRIER",
+        "@llvm.hivm.pset.b16",
+        "@llvm.hivm.pset.b32",
+        "@llvm.hivm.vldsx1.v128s16",
+        "@llvm.hivm.vldsx1.v256s8",
+        "@llvm.hivm.vstsx1.v128s16",
+        "@llvm.hivm.vstsx1.v64s32",
+        "@llvm.hivm.vsunpack.v128i16",
+        "@llvm.hivm.vsunpack.v64i32",
+        "@llvm.hivm.vzunpack.v128i16",
+        "@llvm.hivm.vzunpack.v64i32"
+      ],
+      "generated": "a5_unpack_integer_2048",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "gm_ub_register_a5_predicate_widths_256",
       "ir": "../predicate_widths.ll",
       "case": "../vadd.case.json",
@@ -2806,7 +2832,7 @@
       "core": "vec",
       "target": "dav-351x",
       "fusion_mode": "no_fuse",
-      "expect_asc_status": "static_unsupported",
+      "expect_asc_status": "pass",
       "expect_simulator_status": "pass",
       "intrinsics": [
         "@llvm.hivm.BARRIER",
@@ -2824,7 +2850,8 @@
         "@llvm.hivm.vsunpack.v64i32",
         "@llvm.hivm.vzunpack.v128i16",
         "@llvm.hivm.vzunpack.v64i32"
-      ]
+      ],
+      "require_simulator": false
     },
     {
       "name": "opentile_a5_predicate_immediate",

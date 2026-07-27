@@ -223,6 +223,10 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vsqz.x.v64i32",
     "@llvm.hivm.vsubc.v64u32",
     "@llvm.hivm.vsubcs.v64u32",
+    "@llvm.hivm.vsunpack.v128i16",
+    "@llvm.hivm.vsunpack.v64i32",
+    "@llvm.hivm.vzunpack.v128i16",
+    "@llvm.hivm.vzunpack.v64i32",
     "@llvm.hivm.vstar",
     "@llvm.hivm.vstur",
     "@llvm.hivm.vstus",
@@ -1328,6 +1332,72 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
                 "ub_size_bytes": 4608,
                 "dma_bytes": 1024,
                 "checks": [{"buffer": "out", "golden": golden, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
+    if generated == "a5_unpack_integer_2048":
+        raw8 = [((idx * 73 + 19) & 0xFF) for idx in range(256)]
+        raw8[:8] = [0, 1, 0x7F, 0x80, 0x81, 0xFE, 0xFF, 0x55]
+        raw16_words = [((idx * 40503 + 0x8001) & 0xFFFF) for idx in range(128)]
+        raw16_words[:8] = [0, 1, 0x7FFF, 0x8000, 0x8001, 0xFFFE, 0xFFFF, 0x5555]
+
+        def le16(value: int) -> list[int]:
+            raw = value & 0xFFFF
+            return [raw & 0xFF, (raw >> 8) & 0xFF]
+
+        def le32(value: int) -> list[int]:
+            raw = value & 0xFFFFFFFF
+            return [
+                raw & 0xFF,
+                (raw >> 8) & 0xFF,
+                (raw >> 16) & 0xFF,
+                (raw >> 24) & 0xFF,
+            ]
+
+        def signed8(value: int) -> int:
+            raw = value & 0xFF
+            return raw - 0x100 if raw >= 0x80 else raw
+
+        def signed16(value: int) -> int:
+            raw = value & 0xFFFF
+            return raw - 0x10000 if raw >= 0x8000 else raw
+
+        raw16 = [byte for word in raw16_words for byte in le16(word)]
+        segments = [
+            [byte for value in raw8[:128] for byte in le16(signed8(value))],
+            [byte for value in raw8[128:] for byte in le16(signed8(value))],
+            [byte for value in raw8[:128] for byte in le16(value)],
+            [byte for value in raw8[128:] for byte in le16(value)],
+            [byte for value in raw16_words[:64] for byte in le32(signed16(value))],
+            [byte for value in raw16_words[64:] for byte in le32(signed16(value))],
+            [byte for value in raw16_words[:64] for byte in le32(value)],
+            [byte for value in raw16_words[64:] for byte in le32(value)],
+        ]
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_unpack_integer",
+                "arguments": {
+                    "%input_i8": "input_i8",
+                    "%input_i16": "input_i16",
+                    "%out": "out",
+                },
+                "buffers": {
+                    "input_i8": {"space": "gm", "dtype": "u8", "values": raw8},
+                    "input_i16": {"space": "gm", "dtype": "u8", "values": raw16},
+                    "out": {"space": "gm", "dtype": "u8", "size": 2048},
+                },
+                "ub_dtypes": ["u8", "u16", "u32"],
+                "ub_size_bytes": 4096,
+                "dma_bytes": 256,
+                "checks": [
+                    {
+                        "buffer": "out",
+                        "golden": [byte for segment in segments for byte in segment],
+                        "atol": 0,
+                        "rtol": 0,
+                    }
+                ],
             }
         )
         return

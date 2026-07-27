@@ -385,6 +385,11 @@ def s16(value: int | float) -> int:
     return raw - 0x10000 if raw >= 0x8000 else raw
 
 
+def s8(value: int | float) -> int:
+    raw = int(value) & 0xFF
+    return raw - 0x100 if raw >= 0x80 else raw
+
+
 def round_dtype(value: Any, dtype: str) -> int | float:
     if dtype == "f32":
         return f32(float(value))
@@ -1477,6 +1482,42 @@ class DavVAddSim:
             start = self._check_region(buf, base_byte + byte_offset, VECTOR_BYTES_V256I8, "vldsx1")
             self.values[lhs] = list(buf.values[start : start + LANES_I8_V256])
             self.trace.append(f"{lhs} = vldsx1.s8(UB, byte_offset={base_byte + byte_offset})")
+            return
+
+        if name in ("@llvm.hivm.vsunpack.v128i16", "@llvm.hivm.vzunpack.v128i16"):
+            if lhs is None:
+                raise SimError("vunpack i8->i16 result is unused")
+            if len(args) != 2:
+                raise SimError(f"{name}: expected 2 args, got {len(args)}")
+            src = self._as_u8_vector(args[0], f"{name} source")
+            part = self._as_int(args[1], f"{name} part")
+            if part not in (0, 1):
+                raise SimError(f"{name}: part must be 0 or 1")
+            base = part * LANES_I16_V128
+            if name == "@llvm.hivm.vsunpack.v128i16":
+                result = [s8(value) for value in src[base : base + LANES_I16_V128]]
+            else:
+                result = [int(value) & 0xFF for value in src[base : base + LANES_I16_V128]]
+            self.values[lhs] = result
+            self.trace.append(f"{lhs} = {name.rsplit('.', 2)[-2]}(part={part})")
+            return
+
+        if name in ("@llvm.hivm.vsunpack.v64i32", "@llvm.hivm.vzunpack.v64i32"):
+            if lhs is None:
+                raise SimError("vunpack i16->i32 result is unused")
+            if len(args) != 2:
+                raise SimError(f"{name}: expected 2 args, got {len(args)}")
+            src = self._as_u16_vector(args[0], f"{name} source")
+            part = self._as_int(args[1], f"{name} part")
+            if part not in (0, 1):
+                raise SimError(f"{name}: part must be 0 or 1")
+            base = part * LANES_I32_V64
+            if name == "@llvm.hivm.vsunpack.v64i32":
+                result = [s16(value) for value in src[base : base + LANES_I32_V64]]
+            else:
+                result = [u16(value) for value in src[base : base + LANES_I32_V64]]
+            self.values[lhs] = result
+            self.trace.append(f"{lhs} = {name.rsplit('.', 2)[-2]}(part={part})")
             return
 
         if name in (
