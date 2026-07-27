@@ -137,6 +137,13 @@
       "expect_asc_status": "pass"
     },
     {
+      "name": "gm_ub_register_vsel_64",
+      "ir": "../vadd.ll",
+      "case": "../vadd.case.json",
+      "op": "vsel",
+      "expect_asc_status": "pass"
+    },
+    {
       "name": "special_f32_values_64",
       "ir": "../vadd.ll",
       "case": "../vadd.case.json",
@@ -434,6 +441,18 @@
       "name": "opentile_vector_muls_lowered_n64",
       "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
       "op": "vmuls",
+      "n_elements": 64,
+      "allocated_elements": 1024,
+      "ub_size_bytes": 12288,
+      "dma_bytes": 4096,
+      "target": "dav-351x",
+      "fusion_mode": "no_fuse",
+      "expect_asc_status": "pass"
+    },
+    {
+      "name": "opentile_vector_sel_lowered_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "op": "vsel",
       "n_elements": 64,
       "allocated_elements": 1024,
       "ub_size_bytes": 12288,
@@ -845,6 +864,17 @@
       "core": "vec",
       "target": "dav-351x",
       "op": "vmuls",
+      "n_elements": 64,
+      "expect_simulator_status": "pass"
+    },
+    {
+      "name": "opentile_vector_sel_simulator_n64",
+      "mlir": "simulator/cases/vector_add/kernel.opentile.mlir",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vsel",
       "n_elements": 64,
       "expect_simulator_status": "pass"
     },

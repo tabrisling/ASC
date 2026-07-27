@@ -78,6 +78,10 @@ VECTOR_DUP_INTRINSICS = {
     "vdups": "@llvm.hivm.vdups.z.v64f32",
 }
 
+VECTOR_SELECT_INTRINSICS = {
+    "vsel": "@llvm.hivm.vsel.v64f32",
+}
+
 
 def load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
@@ -214,7 +218,9 @@ def generated_vector_case(
     golden = [0.0] * allocated_elements
     for idx in range(active):
         lane = idx % 64
-        if mask[lane]:
+        if op == "vsel":
+            golden[idx] = f32(x[idx] if mask[lane] else y[idx])
+        elif mask[lane]:
             golden[idx] = eval_vector_op(op, x[idx], y[idx], scalar)
         elif mode == "m":
             golden[idx] = f32(x[idx])
@@ -320,6 +326,8 @@ def eval_vector_op(op: str, a: float, b: float, scalar: float) -> float:
         return f32(max(a, b))
     if op == "vmin":
         return f32(min(a, b))
+    if op == "vsel":
+        return f32(a)
     if op == "vabs":
         return f32(abs(a))
     if op == "vneg":
@@ -357,7 +365,9 @@ def apply_vector_op_case(
     mask = pattern_to_mask(mask_pattern)
     golden = []
     for idx, (x, y) in enumerate(zip(a, b)):
-        if mask[idx % 64]:
+        if op == "vsel":
+            golden.append(f32(x if mask[idx % 64] else y))
+        elif mask[idx % 64]:
             golden.append(eval_vector_op(op, x, y, scalar))
         elif mode == "m":
             golden.append(f32(x))
@@ -375,7 +385,13 @@ def op_intrinsic(op: str, mode: str = "x") -> str:
         return VECTOR_SCALAR_MODE_INTRINSICS[(op, mode)]
     if mode != "x":
         raise RuntimeError(f"unsupported vector op/mode: {op}.{mode}")
-    for table in (VECTOR_BINARY_INTRINSICS, VECTOR_UNARY_INTRINSICS, VECTOR_SCALAR_INTRINSICS, VECTOR_DUP_INTRINSICS):
+    for table in (
+        VECTOR_BINARY_INTRINSICS,
+        VECTOR_UNARY_INTRINSICS,
+        VECTOR_SCALAR_INTRINSICS,
+        VECTOR_DUP_INTRINSICS,
+        VECTOR_SELECT_INTRINSICS,
+    ):
         if op in table:
             return table[op]
     raise RuntimeError(f"unsupported vector op: {op}")
@@ -396,7 +412,7 @@ def patch_vector_compute_ir(case_name: str, ir_text: str, op: str, lowered: bool
         a = match.group("a")
         b = match.group("b")
         mask = match.group("mask")
-        if op in VECTOR_BINARY_INTRINSICS:
+        if op in VECTOR_BINARY_INTRINSICS or op in VECTOR_SELECT_INTRINSICS:
             return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <64 x float> {b}, <256 x i1> {mask})"
         if op in VECTOR_UNARY_INTRINSICS:
             return f"{lhs} = call <64 x float> {target}(<64 x float> {a}, <256 x i1> {mask})"
@@ -413,7 +429,7 @@ def patch_vector_compute_ir(case_name: str, ir_text: str, op: str, lowered: bool
     declare_source = (
         f"declare <64 x float> {source}(<64 x float>, <64 x float>, <256 x i1>)"
     )
-    if op in VECTOR_BINARY_INTRINSICS:
+    if op in VECTOR_BINARY_INTRINSICS or op in VECTOR_SELECT_INTRINSICS:
         declare_target = f"declare <64 x float> {target}(<64 x float>, <64 x float>, <256 x i1>)"
     elif op in VECTOR_UNARY_INTRINSICS:
         declare_target = f"declare <64 x float> {target}(<64 x float>, <256 x i1>)"
@@ -759,6 +775,8 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "        return np.maximum(x, y)",
                 "    if OP == 'vmin':",
                 "        return np.minimum(x, y)",
+                "    if OP == 'vsel':",
+                "        return x",
                 "    if OP == 'vabs':",
                 "        return np.abs(x)",
                 "    if OP == 'vneg':",
@@ -793,6 +811,9 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "    for idx in range(n):",
                 "        lane = idx % 64",
                 "        if lane >= store_active:",
+                "            continue",
+                "        if OP == 'vsel':",
+                "            out[idx] = x[idx] if lane < compute_active else y[idx]",
                 "            continue",
                 "        if lane < compute_active:",
                 "            out[idx] = computed[idx]",

@@ -42,6 +42,7 @@ MODEL_SUPPORTED = {
     "@llvm.hivm.vmaxs.s.x.v64f32",
     "@llvm.hivm.vmins.s.x.v64f32",
     "@llvm.hivm.vdups.z.v64f32",
+    "@llvm.hivm.vsel.v64f32",
 }
 
 SUITE_OP_INTRINSICS = {
@@ -92,6 +93,7 @@ SUITE_OP_INTRINSICS = {
     "vmaxs": "@llvm.hivm.vmaxs.s.x.v64f32",
     "vmins": "@llvm.hivm.vmins.s.x.v64f32",
     "vdups": "@llvm.hivm.vdups.z.v64f32",
+    "vsel": "@llvm.hivm.vsel.v64f32",
 }
 
 
