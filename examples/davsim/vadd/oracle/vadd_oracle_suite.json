@@ -1608,6 +1608,73 @@
       "expect_asc_status": "error"
     },
     {
+      "name": "direct_ir_p1_reduction_prelu_float_unsupported",
+      "ir": "unsupported/p1_reduction_prelu_float.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vcgadd.s.x.v64f32",
+        "@llvm.hivm.vcgadd.s.x.v128f16",
+        "@llvm.hivm.vcgmax.s.x.v64f32",
+        "@llvm.hivm.vcgmax.s.x.v128f16",
+        "@llvm.hivm.vcgmin.s.x.v64f32",
+        "@llvm.hivm.vcgmin.s.x.v128f16",
+        "@llvm.hivm.vcpadd.x.v64f32",
+        "@llvm.hivm.vcpadd.x.v128f16",
+        "@llvm.hivm.vcbmax.s.x.v64f32",
+        "@llvm.hivm.vcbmax.s.m.v64f32",
+        "@llvm.hivm.vcbmax.s.x.v128f16",
+        "@llvm.hivm.vcbmax.s.m.v128f16",
+        "@llvm.hivm.vcbmin.s.x.v64f32",
+        "@llvm.hivm.vcbmin.s.m.v64f32",
+        "@llvm.hivm.vcbmin.s.x.v128f16",
+        "@llvm.hivm.vcbmin.s.m.v128f16",
+        "@llvm.hivm.vprelu.m.v64f32",
+        "@llvm.hivm.vprelu.x.v64f32",
+        "@llvm.hivm.vprelu.z.v64f32",
+        "@llvm.hivm.vprelu.m.v128f16",
+        "@llvm.hivm.vprelu.x.v128f16",
+        "@llvm.hivm.vprelu.z.v128f16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
+      "name": "direct_ir_p1_memory_float_unsupported",
+      "ir": "unsupported/p1_memory_float.ll",
+      "case": "../vadd.case.json",
+      "op": null,
+      "kernel_intrinsics": false,
+      "intrinsics": [
+        "@llvm.hivm.vld.v64f32",
+        "@llvm.hivm.vld.v128f16",
+        "@llvm.hivm.vld.v128bf16",
+        "@llvm.hivm.vst.v64f32",
+        "@llvm.hivm.vst.v128f16",
+        "@llvm.hivm.vst.v128bf16",
+        "@llvm.hivm.vsstb.v64f32",
+        "@llvm.hivm.vsstb.v128f16",
+        "@llvm.hivm.vsstb.v128bf16"
+      ],
+      "case_overrides": {
+        "entry": "add_kernel",
+        "arguments": {
+          "%0": "a",
+          "%1": "b",
+          "%2": "out"
+        }
+      },
+      "expect_asc_status": "error"
+    },
+    {
       "name": "direct_ir_p1_scalar_f16_bf16_unsupported",
       "ir": "unsupported/p1_scalar_f16_bf16.ll",
       "case": "../vadd.case.json",
@@ -3492,6 +3559,71 @@
         "@llvm.hivm.vslide.v128f16"
       ],
       "expect_simulator_status": "check_failed"
+    },
+    {
+      "name": "direct_ir_p1_reduction_prelu_float_simulator_n64",
+      "ir": "unsupported/p1_reduction_prelu_float.ll",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vadd",
+      "suite_op": false,
+      "simulator_dtype": "float32",
+      "simulator_shape": 64,
+      "vector_lanes": 64,
+      "n_elements": 64,
+      "intrinsics": [
+        "@llvm.hivm.vcgadd.s.x.v64f32",
+        "@llvm.hivm.vcgadd.s.x.v128f16",
+        "@llvm.hivm.vcgmax.s.x.v64f32",
+        "@llvm.hivm.vcgmax.s.x.v128f16",
+        "@llvm.hivm.vcgmin.s.x.v64f32",
+        "@llvm.hivm.vcgmin.s.x.v128f16",
+        "@llvm.hivm.vcpadd.x.v64f32",
+        "@llvm.hivm.vcpadd.x.v128f16",
+        "@llvm.hivm.vcbmax.s.x.v64f32",
+        "@llvm.hivm.vcbmax.s.m.v64f32",
+        "@llvm.hivm.vcbmax.s.x.v128f16",
+        "@llvm.hivm.vcbmax.s.m.v128f16",
+        "@llvm.hivm.vcbmin.s.x.v64f32",
+        "@llvm.hivm.vcbmin.s.m.v64f32",
+        "@llvm.hivm.vcbmin.s.x.v128f16",
+        "@llvm.hivm.vcbmin.s.m.v128f16",
+        "@llvm.hivm.vprelu.m.v64f32",
+        "@llvm.hivm.vprelu.x.v64f32",
+        "@llvm.hivm.vprelu.z.v64f32",
+        "@llvm.hivm.vprelu.m.v128f16",
+        "@llvm.hivm.vprelu.x.v128f16",
+        "@llvm.hivm.vprelu.z.v128f16"
+      ],
+      "expect_simulator_status": "error"
+    },
+    {
+      "name": "direct_ir_p1_memory_float_simulator_n64",
+      "ir": "unsupported/p1_memory_float.ll",
+      "case_dir": "simulator/cases/vector_add",
+      "config": "runner.json",
+      "core": "vec",
+      "target": "dav-351x",
+      "op": "vadd",
+      "suite_op": false,
+      "simulator_dtype": "float32",
+      "simulator_shape": 64,
+      "vector_lanes": 64,
+      "n_elements": 64,
+      "intrinsics": [
+        "@llvm.hivm.vld.v64f32",
+        "@llvm.hivm.vld.v128f16",
+        "@llvm.hivm.vld.v128bf16",
+        "@llvm.hivm.vst.v64f32",
+        "@llvm.hivm.vst.v128f16",
+        "@llvm.hivm.vst.v128bf16",
+        "@llvm.hivm.vsstb.v64f32",
+        "@llvm.hivm.vsstb.v128f16",
+        "@llvm.hivm.vsstb.v128bf16"
+      ],
+      "expect_simulator_status": "error"
     },
     {
       "name": "direct_ir_p1_scalar_f16_bf16_simulator_n128",
