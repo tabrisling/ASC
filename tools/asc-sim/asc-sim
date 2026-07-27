@@ -65,6 +65,8 @@ DIFF_EXP_VECTOR_OPS = {
 
 REDUCTION_VECTOR_OPS = {
     "@llvm.hivm.vcadd.s.x.v64f32": "vcadd",
+    "@llvm.hivm.vcmax.s.x.v64f32": "vcmax",
+    "@llvm.hivm.vcmin.s.x.v64f32": "vcmin",
 }
 
 VMULL_VECTOR_OPS = {
@@ -688,7 +690,7 @@ class DavVAddSim:
             op_label = REDUCTION_VECTOR_OPS[name]
             vec = self._as_vector(args[0], f"{op_label} input")
             mask = self._as_mask(args[1], f"{op_label} mask")
-            self.values[lhs] = self._reduce_vcadd_vector(vec, mask)
+            self.values[lhs] = self._reduce_vector(vec, mask, op_label)
             self.trace.append(f"{lhs} = {op_label}({args[0].value}, {args[1].value})")
             return
 
@@ -826,19 +828,30 @@ class DavVAddSim:
             result.append(f32_exp(f32(float(left[idx]) - float(right[idx]))))
         return result
 
-    def _reduce_vcadd_vector(
+    def _reduce_vector(
         self,
         vec: list[float | None],
         mask: list[bool],
+        op_label: str,
     ) -> list[float | None]:
         if not all(mask):
-            raise SimError("vcadd milestone supports full mask only")
-        total = 0.0
+            raise SimError(f"{op_label} milestone supports full mask only")
+        values: list[float] = []
         for idx in range(LANES_F32_V64):
             if vec[idx] is None:
-                raise SimError(f"vcadd reads inactive source lane {idx}")
-            total = f32(total + float(vec[idx]))
-        return [total] + [0.0] * (LANES_F32_V64 - 1)
+                raise SimError(f"{op_label} reads inactive source lane {idx}")
+            values.append(float(vec[idx]))
+        if op_label == "vcadd":
+            result = 0.0
+            for value in values:
+                result = f32(result + value)
+        elif op_label == "vcmax":
+            result = f32(max(values))
+        elif op_label == "vcmin":
+            result = f32(min(values))
+        else:
+            raise SimError(f"unsupported reduction op {op_label}")
+        return [result] + [0.0] * (LANES_F32_V64 - 1)
 
     def _execute_scalar_or_pointer_line(self, line: str) -> bool:
         shufflevector = re.match(

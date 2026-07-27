@@ -47,6 +47,8 @@ MODEL_SUPPORTED = {
     "@llvm.hivm.vsel.v64f32",
     "@llvm.hivm.vexpdif.v64f32",
     "@llvm.hivm.vcadd.s.x.v64f32",
+    "@llvm.hivm.vcmax.s.x.v64f32",
+    "@llvm.hivm.vcmin.s.x.v64f32",
 }
 
 SUITE_OP_INTRINSICS = {
@@ -102,6 +104,8 @@ SUITE_OP_INTRINSICS = {
     "vsel": "@llvm.hivm.vsel.v64f32",
     "vexpdif": "@llvm.hivm.vexpdif.v64f32",
     "vcadd": "@llvm.hivm.vcadd.s.x.v64f32",
+    "vcmax": "@llvm.hivm.vcmax.s.x.v64f32",
+    "vcmin": "@llvm.hivm.vcmin.s.x.v64f32",
     "vmull": {
         "m": "@llvm.hivm.vmull.s.m.v64f32",
         "x": "@llvm.hivm.vmull.s.x.v64f32",

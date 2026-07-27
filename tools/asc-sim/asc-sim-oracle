@@ -90,6 +90,8 @@ VECTOR_DIFF_EXP_INTRINSICS = {
 
 VECTOR_REDUCTION_INTRINSICS = {
     "vcadd": "@llvm.hivm.vcadd.s.x.v64f32",
+    "vcmax": "@llvm.hivm.vcmax.s.x.v64f32",
+    "vcmin": "@llvm.hivm.vcmin.s.x.v64f32",
 }
 
 VECTOR_VMULL_INTRINSICS = {
@@ -134,6 +136,8 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vsel.v64f32",
     "@llvm.hivm.vexpdif.v64f32",
     "@llvm.hivm.vcadd.s.x.v64f32",
+    "@llvm.hivm.vcmax.s.x.v64f32",
+    "@llvm.hivm.vcmin.s.x.v64f32",
 }
 
 HIVM_INTRINSIC_RE = re.compile(r"@llvm\.hivm\.[A-Za-z0-9_.$]+")
@@ -302,15 +306,23 @@ def generated_vector_case(
             "dma_bytes": dma_bytes,
             "checks": [{"buffer": "output", "golden": golden, "atol": 0, "rtol": 0}],
         }
-    if op == "vcadd":
+    if op in ("vcadd", "vcmax", "vcmin"):
         for group_start in range(0, active, 64):
             group_end = min(group_start + 64, active)
-            total = 0.0
+            values = []
             for idx in range(group_start, group_end):
                 lane = idx % 64
                 if mask[lane]:
-                    total = f32(total + x[idx])
-            golden[group_start] = total
+                    values.append(x[idx])
+            if op == "vcadd":
+                result = 0.0
+                for value in values:
+                    result = f32(result + value)
+            elif op == "vcmax":
+                result = f32(max(values))
+            else:
+                result = f32(min(values))
+            golden[group_start] = result
         return {
             "entry": "add_kernel",
             "arguments": {"%0": "x", "%1": "y", "%2": "output"},
@@ -495,6 +507,8 @@ def eval_vector_op(op: str, a: float, b: float, scalar: float) -> float:
         return f32(scalar)
     if op == "vcadd":
         return f32(a)
+    if op in ("vcmax", "vcmin"):
+        return f32(a)
     raise RuntimeError(f"unsupported vector op: {op}")
 
 
@@ -519,14 +533,22 @@ def apply_vector_op_case(
                 golden.append(0.0)
         case_json["checks"][0]["golden"] = golden
         return
-    if op == "vcadd":
+    if op in ("vcadd", "vcmax", "vcmin"):
         for group_start in range(0, len(a), 64):
             group = a[group_start : group_start + 64]
-            total = 0.0
+            values = []
             for lane, x in enumerate(group):
                 if mask[lane]:
-                    total = f32(total + x)
-            golden.extend([total] + [0.0] * (len(group) - 1))
+                    values.append(x)
+            if op == "vcadd":
+                result = 0.0
+                for value in values:
+                    result = f32(result + value)
+            elif op == "vcmax":
+                result = f32(max(values))
+            else:
+                result = f32(min(values))
+            golden.extend([result] + [0.0] * (len(group) - 1))
         case_json["checks"][0]["golden"] = golden
         return
     for idx, (x, y) in enumerate(zip(a, b)):
@@ -1131,6 +1153,10 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "        return np.exp(x - y)",
                 "    if OP == 'vcadd':",
                 "        return x",
+                "    if OP == 'vcmax':",
+                "        return x",
+                "    if OP == 'vcmin':",
+                "        return x",
                 "    if OP == 'vmull':",
                 "        src = x if EXTRACT == 0 else y",
                 "        return src * src",
@@ -1160,11 +1186,17 @@ def materialize_simulator_case(case_cfg: dict[str, Any], opentileas_repo: Path, 
                 "        if OP == 'vsel':",
                 "            out[idx] = x[idx] if lane < compute_active else y[idx]",
                 "            continue",
-                "        if OP == 'vcadd':",
+                "        if OP in ('vcadd', 'vcmax', 'vcmin'):",
                 "            if lane == 0:",
                 "                end = min(idx + 64, n)",
                 "                active_end = min(idx + compute_active, end)",
-                "                out[idx] = np.sum(x[idx:active_end].astype(np.float32), dtype=np.float32)",
+                "                values = x[idx:active_end].astype(np.float32)",
+                "                if OP == 'vcadd':",
+                "                    out[idx] = np.sum(values, dtype=np.float32)",
+                "                elif OP == 'vcmax':",
+                "                    out[idx] = np.max(values).astype(np.float32)",
+                "                else:",
+                "                    out[idx] = np.min(values).astype(np.float32)",
                 "            continue",
                 "        if lane < compute_active:",
                 "            out[idx] = computed[idx]",
