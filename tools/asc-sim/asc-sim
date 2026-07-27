@@ -47,10 +47,26 @@ B8_FULL_ACTIVE_STORED_BYTES = 2
 MEMORY_BLOCK_BYTES = 32
 MEMORY_BLOCK_COUNT = 8
 GM_ADDRSPACE = 1
+L1_ADDRSPACE = 2
+L0A_ADDRSPACE = 3
+L0B_ADDRSPACE = 4
+L0C_ADDRSPACE = 5
 UB_ADDRSPACE = 6
 ALIGNMENT_BYTES = 32
 DEFAULT_UB_BYTES = 4096
+DEFAULT_L1_BYTES = 4096
+DEFAULT_L0_BYTES = 2048
+DEFAULT_L0C_BYTES = 4096
 DMA_V2_LOW_COUNT_BYTES = 2
+
+ADDRSPACE_TO_SPACE = {
+    GM_ADDRSPACE: "gm",
+    L1_ADDRSPACE: "l1",
+    L0A_ADDRSPACE: "l0a",
+    L0B_ADDRSPACE: "l0b",
+    L0C_ADDRSPACE: "l0c",
+    UB_ADDRSPACE: "ub",
+}
 
 BINARY_VECTOR_OPS = {
     "@llvm.hivm.vadd.v64f32.x": ("vadd", "x", lambda a, b: f32(a + b)),
@@ -332,6 +348,40 @@ def build_buffers(case: dict[str, Any]) -> dict[str, Buffer]:
                 dtype=dtype,
                 space="ub",
             )
+    if "__l1_u8" not in buffers:
+        size_bytes = int(case.get("l1_size_bytes", DEFAULT_L1_BYTES))
+        buffers["__l1_u8"] = Buffer(
+            name="__l1_u8",
+            values=[0] * size_bytes,
+            dtype="u8",
+            space="l1",
+        )
+    if "__l0a_u8" not in buffers:
+        size_bytes = int(case.get("l0a_size_bytes", DEFAULT_L0_BYTES))
+        buffers["__l0a_u8"] = Buffer(
+            name="__l0a_u8",
+            values=[0] * size_bytes,
+            dtype="u8",
+            space="l0a",
+        )
+    if "__l0b_u8" not in buffers:
+        size_bytes = int(case.get("l0b_size_bytes", DEFAULT_L0_BYTES))
+        buffers["__l0b_u8"] = Buffer(
+            name="__l0b_u8",
+            values=[0] * size_bytes,
+            dtype="u8",
+            space="l0b",
+        )
+    if "__l0c_f32" not in buffers:
+        size_bytes = int(case.get("l0c_size_bytes", DEFAULT_L0C_BYTES))
+        if size_bytes % F32_BYTES != 0:
+            raise SimError("l0c_size_bytes must be divisible by 4")
+        buffers["__l0c_f32"] = Buffer(
+            name="__l0c_f32",
+            values=[0.0] * (size_bytes // F32_BYTES),
+            dtype="f32",
+            space="l0c",
+        )
     return buffers
 
 
@@ -508,6 +558,22 @@ def f32(value: float) -> float:
         return math.copysign(float("inf"), value)
 
 
+def fp8_e4m3_to_f32(value: int | float) -> float:
+    raw = int(value) & 0xFF
+    sign = -1.0 if raw & 0x80 else 1.0
+    exponent = (raw >> 3) & 0x0F
+    mantissa = raw & 0x07
+    if exponent == 0:
+        magnitude = (mantissa / 8.0) * math.ldexp(1.0, -6)
+    else:
+        magnitude = (1.0 + mantissa / 8.0) * math.ldexp(1.0, exponent - 7)
+    return f32(sign * magnitude)
+
+
+def e8m0_to_f32(value: int | float) -> float:
+    return f32(math.ldexp(1.0, (int(value) & 0xFF) - 127))
+
+
 def f32_div(a: float, b: float) -> float:
     if math.isnan(a) or math.isnan(b):
         return float("nan")
@@ -577,6 +643,10 @@ class DavVAddSim:
         self.vms4_sr = 0
         self.loop3_para: int | None = None
         self.channel_para: int | None = None
+        self.l0a_payload: list[int] | None = None
+        self.l0b_payload: list[int] | None = None
+        self.l0a_scale: list[int] | None = None
+        self.l0b_scale: list[int] | None = None
 
     def _build_pointer_bindings(self) -> dict[str, str]:
         explicit = self.case.get("arguments", {})
@@ -587,10 +657,9 @@ class DavVAddSim:
             name = explicit.get(symbol, symbol.lstrip("%"))
             if name not in self.buffers:
                 raise SimError(f"argument {symbol} maps to missing buffer {name!r}")
-            if addrspace is not None and addrspace not in (GM_ADDRSPACE, UB_ADDRSPACE):
+            if addrspace is not None and addrspace not in ADDRSPACE_TO_SPACE:
                 raise SimError(
-                    f"argument {symbol} uses addrspace({addrspace}); "
-                    "only GM addrspace(1) and UB addrspace(6) are supported"
+                    f"argument {symbol} uses unsupported addrspace({addrspace})"
                 )
             bindings[symbol] = name
         return bindings
@@ -611,16 +680,21 @@ class DavVAddSim:
         expected_space: str,
         preferred_dtype: str | None = None,
     ) -> tuple[Buffer, int]:
-        expected_addrspace = GM_ADDRSPACE if expected_space == "gm" else UB_ADDRSPACE
+        expected_addrspace = next(
+            (addrspace for addrspace, space in ADDRSPACE_TO_SPACE.items() if space == expected_space),
+            None,
+        )
+        if expected_addrspace is None:
+            raise SimError(f"unsupported memory space {expected_space}")
         if ptr.addrspace is not None and ptr.addrspace != expected_addrspace:
             raise SimError(
                 f"pointer uses addrspace({ptr.addrspace}); expected "
                 f"addrspace({expected_addrspace}) for {expected_space}"
             )
         if isinstance(ptr.value, int):
-            if expected_space != "ub":
-                raise SimError("integer pointer constants are only supported for UB")
-            return self._default_ub_buffer(preferred_dtype), ptr.value
+            if expected_space == "gm":
+                raise SimError("integer pointer constants are not supported for GM")
+            return self._default_buffer(expected_space, preferred_dtype), ptr.value
         bound = self.values.get(ptr.value)
         if isinstance(bound, PointerValue):
             if bound.addrspace != expected_addrspace:
@@ -641,6 +715,18 @@ class DavVAddSim:
         return buf, byte_offset
 
     def _default_ub_buffer(self, preferred_dtype: str | None) -> Buffer:
+        return self._default_buffer("ub", preferred_dtype)
+
+    def _default_buffer(self, space: str, preferred_dtype: str | None) -> Buffer:
+        if space != "ub":
+            dtype = preferred_dtype or ("f32" if space == "l0c" else "u8")
+            typed_name = f"__{space}_{dtype}"
+            if typed_name in self.buffers:
+                return self.buffers[typed_name]
+            generic_name = f"__{space}"
+            if generic_name in self.buffers:
+                return self.buffers[generic_name]
+            raise SimError(f"{space.upper()} has no {dtype} view")
         if preferred_dtype:
             typed_name = f"__ub_{preferred_dtype}"
             if typed_name in self.buffers:
@@ -753,6 +839,39 @@ class DavVAddSim:
             raise SimError(f"{op}: expected byte UB buffer, got {buf.dtype}")
         start = self._check_region(buf, byte_offset, byte_count, op, alignment=1)
         return [int(x) & 0xFF for x in buf.values[start : start + byte_count]]
+
+    def _read_buffer_bytes(
+        self,
+        buf: Buffer,
+        byte_offset: int,
+        byte_count: int,
+        op: str,
+        alignment: int = 1,
+    ) -> list[int]:
+        start = self._check_region(buf, byte_offset, byte_count, op, alignment=alignment)
+        if buf.dtype in ("u8", "s8"):
+            return [int(x) & 0xFF for x in buf.values[start : start + byte_count]]
+        if buf.dtype in ("u16", "s16", "f16", "bf16"):
+            count = byte_count // I16_BYTES
+            return [
+                byte
+                for value in buf.values[start : start + count]
+                for byte in u16_to_le_bytes(value)
+            ]
+        if buf.dtype in ("u32", "s32", "f32"):
+            count = byte_count // I32_BYTES
+            if buf.dtype == "f32":
+                return [
+                    byte
+                    for value in buf.values[start : start + count]
+                    for byte in f32_to_le_bytes(value)
+                ]
+            return [
+                byte
+                for value in buf.values[start : start + count]
+                for byte in u32_to_le_bytes(value)
+            ]
+        raise SimError(f"{op}: raw byte read does not support {buf.dtype} buffers")
 
     def _write_ub_bytes(self, byte_offset: int, values: list[int], op: str) -> None:
         byte_view = self.buffers.get("__ub_u8") or self.buffers.get("__ub_s8")
@@ -1204,6 +1323,122 @@ class DavVAddSim:
                 f"MOV.UB.TO.OUT UB[{src_base}:{src_base + byte_count}] -> "
                 f"{dst.name}[0:{byte_count}]"
             )
+            return
+
+        if name == "@llvm.hivm.MOV.OUT.TO.L1.ALIGN.V2.e4m3.DV":
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            descriptor = self._as_int(args[2], "MOV.OUT.TO.L1 descriptor")
+            byte_count_by_descriptor = {
+                34359738384: 1024,
+                2147483664: 64,
+            }
+            if descriptor not in byte_count_by_descriptor:
+                raise SimError(f"{name}: unsupported descriptor {descriptor}")
+            src, src_base = self._resolve_pointer(args[1], "gm")
+            dst, dst_base = self._resolve_pointer(args[0], "l1", preferred_dtype="u8")
+            if src.dtype != "u8" or dst.dtype != "u8":
+                raise SimError(f"{name}: expected u8/e4m3 byte buffers, got {src.dtype}->{dst.dtype}")
+            byte_count = byte_count_by_descriptor[descriptor]
+            self._copy_typed(src, src_base, dst, dst_base, byte_count, "MOV.OUT.TO.L1")
+            self.trace.append(
+                f"MOV.OUT.TO.L1 {src.name}[0:{byte_count}] -> "
+                f"L1[{dst_base}:{dst_base + byte_count}]"
+            )
+            return
+
+        if name in ("@llvm.hivm.LOAD.L1.TO.L0A.2Dv2.s8", "@llvm.hivm.LOAD.L1.TO.L0B.2Dv2.s8"):
+            if len(args) != 5:
+                raise SimError(f"{name}: expected 5 args, got {len(args)}")
+            cfg0 = self._as_int(args[2], f"{name} cfg0")
+            cfg1 = self._as_int(args[3], f"{name} cfg1")
+            transpose = self._as_int(args[4], f"{name} transpose")
+            expected = {
+                "@llvm.hivm.LOAD.L1.TO.L0A.2Dv2.s8": (2203318222848, 65537, 0, "l0a"),
+                "@llvm.hivm.LOAD.L1.TO.L0B.2Dv2.s8": (1116691496960, 131076, 1, "l0b"),
+            }[name]
+            if (cfg0, cfg1, transpose) != expected[:3]:
+                raise SimError(f"{name}: unsupported config {(cfg0, cfg1, transpose)}")
+            src, src_base = self._resolve_pointer(args[1], "l1", preferred_dtype="u8")
+            dst, dst_base = self._resolve_pointer(args[0], expected[3], preferred_dtype="u8")
+            payload = self._read_buffer_bytes(src, src_base, 1024, name + " read")
+            self._write_buffer_bytes(dst, dst_base, payload, name + " write")
+            if expected[3] == "l0a":
+                self.l0a_payload = payload
+            else:
+                self.l0b_payload = payload
+            self.trace.append(f"{name.rsplit('.', 2)[-2]} L1[{src_base}:{src_base + 1024}] -> {expected[3].upper()}")
+            return
+
+        if name in ("@llvm.hivm.LOAD.L1.TO.L0A.MX.2Dv2.v", "@llvm.hivm.LOAD.L1.TO.L0B.MX.2Dv2.v"):
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            dst_id = self._as_int(args[0], f"{name} dst id")
+            cfg0 = self._as_int(args[2], f"{name} cfg0")
+            cfg1 = self._as_int(args[3], f"{name} cfg1")
+            if (dst_id, cfg0, cfg1) != (0, 1103806595072, 65537):
+                raise SimError(f"{name}: unsupported config {(dst_id, cfg0, cfg1)}")
+            src, src_base = self._resolve_pointer(args[1], "l1", preferred_dtype="u8")
+            payload = self._read_buffer_bytes(src, src_base, 64, name + " read")
+            if name == "@llvm.hivm.LOAD.L1.TO.L0A.MX.2Dv2.v":
+                self.l0a_scale = payload
+            else:
+                self.l0b_scale = payload
+            self.trace.append(f"{name.rsplit('.', 3)[-3]} scale L1[{src_base}:{src_base + 64}]")
+            return
+
+        if name == "@llvm.hivm.MMAD.MX.e4m3e4m3":
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            config = self._as_int(args[3], "MMAD.MX config")
+            if config != -6845471433334456304:
+                raise SimError(f"{name}: unsupported config {config}")
+            if self.l0a_payload is None or self.l0b_payload is None:
+                raise SimError("MMAD.MX requires L0A/L0B payloads")
+            if self.l0a_scale is None or self.l0b_scale is None:
+                raise SimError("MMAD.MX requires L0A/L0B MX scales")
+            dst, dst_base = self._resolve_pointer(args[0], "l0c", preferred_dtype="f32")
+            if dst.dtype != "f32":
+                raise SimError(f"{name}: expected f32 L0C buffer, got {dst.dtype}")
+            start = self._check_region(dst, dst_base, 16 * 16 * F32_BYTES, "MMAD.MX L0C")
+            a_values = [fp8_e4m3_to_f32(x) for x in self.l0a_payload[: 16 * 64]]
+            b_values = [fp8_e4m3_to_f32(x) for x in self.l0b_payload[: 64 * 16]]
+            a_scale = [e8m0_to_f32(x) for x in self.l0a_scale[:32]]
+            b_scale_raw = [e8m0_to_f32(x) for x in self.l0b_scale[:32]]
+            result = [0.0] * (16 * 16)
+            for m in range(16):
+                for n in range(16):
+                    acc = 0.0
+                    for group in range(2):
+                        a_s = a_scale[m * 2 + group]
+                        b_s = b_scale_raw[n * 2 + group]
+                        for k_inner in range(32):
+                            k = group * 32 + k_inner
+                            a = f32(a_values[m * 64 + k] * a_s)
+                            b = f32(b_values[k * 16 + n] * b_s)
+                            acc = f32(acc + f32(a * b))
+                    result[m * 16 + n] = f32(acc)
+            dst.values[start : start + len(result)] = result
+            self.trace.append("MMAD.MX.e4m3e4m3(16x16x64)")
+            return
+
+        if name == "@llvm.hivm.FIX.L0C.TO.OUT.f32.EXT":
+            if len(args) != 4:
+                raise SimError(f"{name}: expected 4 args, got {len(args)}")
+            cfg0 = self._as_int(args[2], "FIX.L0C.TO.OUT cfg0")
+            cfg1 = self._as_int(args[3], "FIX.L0C.TO.OUT cfg1")
+            if (cfg0, cfg1) != (68720525568, 8796093022224):
+                raise SimError(f"{name}: unsupported config {(cfg0, cfg1)}")
+            if self.loop3_para != 1 or self.channel_para != 0:
+                raise SimError("FIX.L0C.TO.OUT requires loop3=1 and channel=0")
+            dst, dst_base = self._resolve_pointer(args[0], "gm")
+            src, src_base = self._resolve_pointer(args[1], "l0c", preferred_dtype="f32")
+            if dst.dtype != "f32" or src.dtype != "f32":
+                raise SimError(f"{name}: expected f32 L0C->GM, got {src.dtype}->{dst.dtype}")
+            src_start = self._check_region(src, src_base, 16 * 16 * F32_BYTES, "FIX read")
+            dst_start = self._check_region(dst, dst_base, 16 * 16 * F32_BYTES, "FIX write")
+            dst.values[dst_start : dst_start + 256] = list(src.values[src_start : src_start + 256])
+            self.trace.append("FIX.L0C.TO.OUT.f32(16x16)")
             return
 
         if name == "@llvm.hivm.vldsx1.v64f32":

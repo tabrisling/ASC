@@ -134,6 +134,7 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.SET.LOOP3.PARA",
     "@llvm.hivm.WAIT.FLAG.IMM",
     "@llvm.hivm.BARRIER",
+    "@llvm.hivm.FIX.L0C.TO.OUT.f32.EXT",
     "@llvm.hivm.GET.VMS4.SR",
     "@llvm.hivm.VBS32.V300.f16",
     "@llvm.hivm.VBS32.V300.f32",
@@ -144,6 +145,12 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.s32.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f32.DV",
     "@llvm.hivm.MOV.OUT.TO.UB.ALIGN.V2.f16.DV",
+    "@llvm.hivm.MOV.OUT.TO.L1.ALIGN.V2.e4m3.DV",
+    "@llvm.hivm.LOAD.L1.TO.L0A.2Dv2.s8",
+    "@llvm.hivm.LOAD.L1.TO.L0A.MX.2Dv2.v",
+    "@llvm.hivm.LOAD.L1.TO.L0B.2Dv2.s8",
+    "@llvm.hivm.LOAD.L1.TO.L0B.MX.2Dv2.v",
+    "@llvm.hivm.MMAD.MX.e4m3e4m3",
     "@llvm.hivm.MOV.UB.TO.OUT.ALIGN.V2.DV",
     "@llvm.hivm.init.vector.align.data",
     "@llvm.hivm.mem.bar.vv.all",
@@ -898,6 +905,83 @@ def patch_mask_patterns(ir_text: str, case_cfg: dict[str, Any]) -> str:
 
 
 def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
+    if generated == "a5_mx_mad_e4m3_16x16":
+        m_dim = 16
+        n_dim = 16
+        k_dim = 64
+
+        def fp8_e4m3_to_f32(value: int) -> float:
+            raw = value & 0xFF
+            sign = -1.0 if raw & 0x80 else 1.0
+            exponent = (raw >> 3) & 0x0F
+            mantissa = raw & 0x07
+            if exponent == 0:
+                magnitude = (mantissa / 8.0) * math.ldexp(1.0, -6)
+            else:
+                magnitude = (1.0 + mantissa / 8.0) * math.ldexp(1.0, exponent - 7)
+            return f32(sign * magnitude)
+
+        def e8m0_to_f32(value: int) -> float:
+            return f32(math.ldexp(1.0, (value & 0xFF) - 127))
+
+        a_codes = [0x30, 0x38, 0x40, 0xB8]
+        a = [
+            a_codes[((m * 3) + (k * 5)) % len(a_codes)]
+            for m in range(m_dim)
+            for k in range(k_dim)
+        ]
+        b = [0x38] * (k_dim * n_dim)
+        a_scale = [0] * 64
+        b_scale = [0] * 64
+        for m in range(m_dim):
+            for group in range(k_dim // 32):
+                a_scale[m * 2 + group] = 127 if (m + group) % 2 == 0 else 128
+        for n in range(n_dim):
+            b_scale[n * 2] = 126
+            b_scale[n * 2 + 1] = 127
+        a_values = [fp8_e4m3_to_f32(value) for value in a]
+        b_values = [fp8_e4m3_to_f32(value) for value in b]
+        a_scale_values = [e8m0_to_f32(value) for value in a_scale[:32]]
+        b_scale_values = [e8m0_to_f32(value) for value in b_scale[:32]]
+        golden: list[float] = []
+        for m in range(m_dim):
+            for n in range(n_dim):
+                acc = 0.0
+                for group in range(k_dim // 32):
+                    a_s = a_scale_values[m * 2 + group]
+                    b_s = b_scale_values[n * 2 + group]
+                    for k_inner in range(32):
+                        k = group * 32 + k_inner
+                        lhs = f32(a_values[m * k_dim + k] * a_s)
+                        rhs = f32(b_values[k * n_dim + n] * b_s)
+                        acc = f32(acc + f32(lhs * rhs))
+                golden.append(f32(acc))
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_mx_mad_e4m3",
+                "arguments": {
+                    "%a": "a",
+                    "%b": "b",
+                    "%a_scale": "a_scale",
+                    "%b_scale": "b_scale",
+                    "%c": "c",
+                },
+                "buffers": {
+                    "a": {"space": "gm", "dtype": "u8", "values": a},
+                    "b": {"space": "gm", "dtype": "u8", "values": b},
+                    "a_scale": {"space": "gm", "dtype": "u8", "values": a_scale},
+                    "b_scale": {"space": "gm", "dtype": "u8", "values": b_scale},
+                    "c": {"space": "gm", "dtype": "f32", "size": 256},
+                },
+                "l1_size_bytes": 4096,
+                "l0a_size_bytes": 2048,
+                "l0b_size_bytes": 2048,
+                "l0c_size_bytes": 1024,
+                "checks": [{"buffer": "c", "golden": golden, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
     if generated == "a5_control_params_u32_8":
         data = [0x12345678, 0, 0xFFFFFFFF, 0x80000000, 17, 23, 0xCAFEBABE, 0x0BADF00D]
         case_json.clear()
