@@ -64,6 +64,12 @@ SCALAR_VECTOR_OPS = {
         "x",
         lambda a, s: f32(a if a >= 0.0 else f32(a * s)),
     ),
+    "@llvm.hivm.vlrelu.x.v128f16": (
+        "vlrelu",
+        "x",
+        lambda a, s: f16(a if a >= 0.0 else f16(a * s)),
+        LANES_F16_V128,
+    ),
 }
 
 VECTOR_VECTOR_SCALAR_OPS = {
@@ -72,6 +78,12 @@ VECTOR_VECTOR_SCALAR_OPS = {
         "m",
         lambda dst, src, alpha: f32(dst + f32(src * alpha)),
     ),
+    "@llvm.hivm.vaxpy.m.v128f16": (
+        "vaxpy",
+        "m",
+        lambda dst, src, alpha: f16(dst + f16(src * alpha)),
+        LANES_F16_V128,
+    ),
 }
 
 TERNARY_VECTOR_OPS = {
@@ -79,6 +91,12 @@ TERNARY_VECTOR_OPS = {
         "vmadd",
         "m",
         lambda dst, a, b: f32(f32(dst * a) + b),
+    ),
+    "@llvm.hivm.vmadd.m.v128f16": (
+        "vmadd",
+        "m",
+        lambda dst, a, b: f16(f16(dst * a) + b),
+        LANES_F16_V128,
     ),
 }
 
@@ -191,6 +209,11 @@ def parse_typed_value(text: str) -> TypedValue:
 
     if re.search(r"\bundef\b", text):
         return TypedValue("undef", addrspace)
+
+    m_half_hex = re.search(r"half\s+0xH([0-9A-Fa-f]{4})\s*$", text)
+    if m_half_hex:
+        bits = int(m_half_hex.group(1), 16)
+        return TypedValue(struct.unpack("<e", struct.pack("<H", bits))[0], addrspace)
 
     m_float = re.search(
         r"(?:float|double)\s+([+-]?(?:nan|inf|infinity|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?))\s*$",
@@ -850,10 +873,12 @@ class DavVAddSim:
                 raise SimError(f"{SCALAR_VECTOR_OPS[name][0]} result is unused")
             if len(args) != 3:
                 raise SimError(f"{name}: expected 3 args, got {len(args)}")
-            op_label, mode, op = SCALAR_VECTOR_OPS[name]
-            vec = self._as_vector(args[0], f"{op_label} input")
+            spec = SCALAR_VECTOR_OPS[name]
+            op_label, mode, op = spec[:3]
+            lanes = spec[3] if len(spec) > 3 else LANES_F32_V64
+            vec = self._as_vector(args[0], f"{op_label} input", lanes=lanes)
             scalar = self._as_float(args[1], f"{op_label} scalar")
-            mask = self._as_mask(args[2], f"{op_label} mask")
+            mask = self._as_mask(args[2], f"{op_label} mask", lanes=lanes)
             self.values[lhs] = self._map_scalar_vector(vec, scalar, mask, mode, op)
             self.trace.append(
                 f"{lhs} = {op_label}.{mode}({args[0].value}, {scalar}, {args[2].value})"
@@ -865,11 +890,13 @@ class DavVAddSim:
                 raise SimError(f"{VECTOR_VECTOR_SCALAR_OPS[name][0]} result is unused")
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
-            op_label, mode, op = VECTOR_VECTOR_SCALAR_OPS[name]
-            dst = self._as_vector(args[0], f"{op_label} dst")
-            src = self._as_vector(args[1], f"{op_label} src")
+            spec = VECTOR_VECTOR_SCALAR_OPS[name]
+            op_label, mode, op = spec[:3]
+            lanes = spec[3] if len(spec) > 3 else LANES_F32_V64
+            dst = self._as_vector(args[0], f"{op_label} dst", lanes=lanes)
+            src = self._as_vector(args[1], f"{op_label} src", lanes=lanes)
             scalar = self._as_float(args[2], f"{op_label} scalar")
-            mask = self._as_mask(args[3], f"{op_label} mask")
+            mask = self._as_mask(args[3], f"{op_label} mask", lanes=lanes)
             self.values[lhs] = self._map_vector_vector_scalar(dst, src, scalar, mask, mode, op)
             self.trace.append(
                 f"{lhs} = {op_label}.{mode}("
@@ -882,11 +909,13 @@ class DavVAddSim:
                 raise SimError(f"{TERNARY_VECTOR_OPS[name][0]} result is unused")
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
-            op_label, mode, op = TERNARY_VECTOR_OPS[name]
-            dst = self._as_vector(args[0], f"{op_label} dst")
-            a = self._as_vector(args[1], f"{op_label} lhs")
-            b = self._as_vector(args[2], f"{op_label} rhs")
-            mask = self._as_mask(args[3], f"{op_label} mask")
+            spec = TERNARY_VECTOR_OPS[name]
+            op_label, mode, op = spec[:3]
+            lanes = spec[3] if len(spec) > 3 else LANES_F32_V64
+            dst = self._as_vector(args[0], f"{op_label} dst", lanes=lanes)
+            a = self._as_vector(args[1], f"{op_label} lhs", lanes=lanes)
+            b = self._as_vector(args[2], f"{op_label} rhs", lanes=lanes)
+            mask = self._as_mask(args[3], f"{op_label} mask", lanes=lanes)
             self.values[lhs] = self._map_ternary_vector(dst, a, b, mask, mode, op)
             self.trace.append(
                 f"{lhs} = {op_label}.{mode}("

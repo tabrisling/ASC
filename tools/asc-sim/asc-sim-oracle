@@ -135,6 +135,7 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.pstu.b32",
     "@llvm.hivm.vldsx1.v128f16",
     "@llvm.hivm.vldsx1.v64f32",
+    "@llvm.hivm.vlrelu.x.v128f16",
     "@llvm.hivm.vstsx1.v128f16",
     "@llvm.hivm.vstsx1.v64f32",
     "@llvm.hivm.vstas",
@@ -152,8 +153,10 @@ ASC_MODEL_SUPPORTED_INTRINSICS = {
     "@llvm.hivm.vexp.x.v64f32",
     "@llvm.hivm.vln.x.v64f32",
     "@llvm.hivm.vlrelu.x.v64f32",
+    "@llvm.hivm.vmadd.m.v128f16",
     "@llvm.hivm.vmadd.m.v64f32",
     "@llvm.hivm.vmulscvt.v128f16",
+    "@llvm.hivm.vaxpy.m.v128f16",
     "@llvm.hivm.vaxpy.m.v64f32",
     "@llvm.hivm.vadds.s.x.v64f32",
     "@llvm.hivm.vmuls.s.x.v64f32",
@@ -922,6 +925,36 @@ def apply_generated_asc_case(case_json: dict[str, Any], generated: str) -> None:
                     "out": {"space": "gm", "dtype": "f32", "size": 64},
                 },
                 "ub_size_bytes": 1024,
+                "dma_bytes": 256,
+                "checks": [{"buffer": "out", "golden": golden, "atol": 0, "rtol": 0}],
+            }
+        )
+        return
+    if generated == "a5_fused_f16_128":
+        lane = range(128)
+        x = [f16(((i % 17) - 8) * 0.5) for i in lane]
+        for idx, value in ((0, -0.0), (1, 0.0), (63, -7.5), (64, 3.25), (127, -1.0)):
+            x[idx] = f16(value)
+        acc = [f16(((i * 3) % 19) - 9) for i in lane]
+        mul = [f16(((i % 11) - 5) * 0.25) for i in lane]
+        golden = []
+        for xv, accv, mulv in zip(x, acc, mul):
+            relu = f16(xv if xv >= 0.0 else f16(xv * 0.125))
+            madd = f16(f16(accv * relu) + mulv)
+            golden.append(f16(madd + f16(xv * -0.5)))
+        case_json.clear()
+        case_json.update(
+            {
+                "entry": "dav_fused_f16",
+                "arguments": {"%x": "x", "%acc": "acc", "%mul": "mul", "%out": "out"},
+                "buffers": {
+                    "x": {"space": "gm", "dtype": "f16", "values": x},
+                    "acc": {"space": "gm", "dtype": "f16", "values": acc},
+                    "mul": {"space": "gm", "dtype": "f16", "values": mul},
+                    "out": {"space": "gm", "dtype": "f16", "size": 128},
+                },
+                "ub_dtype": "f16",
+                "ub_size_bytes": 2048,
                 "dma_bytes": 256,
                 "checks": [{"buffer": "out", "golden": golden, "atol": 0, "rtol": 0}],
             }
