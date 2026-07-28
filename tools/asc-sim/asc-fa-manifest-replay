@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Replay external FA simulator cases through ASC's local preflight.
+
+The input manifest is produced outside this repository. This tool intentionally
+does not encode FA-specific failure rules; it only lowers/reads the supplied
+artifact, extracts dav-351x LLVM intrinsics, and applies ASC's current
+supported-intrinsic gate. Simulator-failing cases are expected to be rejected by
+that gate before a slow remote simulator run is needed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+
+def load_oracle_module(repo: Path) -> Any:
+    oracle_path = repo / "tools" / "asc-sim" / "asc-sim-oracle"
+    loader = importlib.machinery.SourceFileLoader("asc_sim_oracle", str(oracle_path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load oracle helper: {oracle_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_json(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def iter_cases(manifest: Any) -> list[dict[str, Any]]:
+    if isinstance(manifest, list):
+        return [case for case in manifest if isinstance(case, dict)]
+    if not isinstance(manifest, dict):
+        raise RuntimeError("manifest root must be an object or list")
+    for key in ("cases", "fa_cases", "results", "runs"):
+        value = manifest.get(key)
+        if isinstance(value, list):
+            return [case for case in value if isinstance(case, dict)]
+    raise RuntimeError("manifest must contain one of: cases, fa_cases, results, runs")
+
+
+def first_existing_path(case: dict[str, Any], keys: tuple[str, ...]) -> Path | None:
+    for key in keys:
+        value = case.get(key)
+        if isinstance(value, str) and value:
+            path = Path(value).expanduser()
+            if path.exists():
+                return path.resolve()
+    return None
+
+
+def first_string(case: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = case.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def simulator_status(case: dict[str, Any]) -> str:
+    value = first_string(
+        case,
+        (
+            "expect_simulator_status",
+            "simulator_status",
+            "status",
+            "result",
+            "outcome",
+        ),
+    )
+    return (value or "unknown").lower()
+
+
+def is_simulator_failure(status: str) -> bool:
+    return status not in ("pass", "passed", "ok", "success", "unknown")
+
+
+def case_name(case: dict[str, Any], index: int) -> str:
+    return str(
+        first_string(case, ("case_id", "id", "name", "run_id", "kernel_id"))
+        or f"fa_manifest_case_{index}"
+    )
+
+
+def resolve_source(case: dict[str, Any], opentileas_repo: Path) -> tuple[str, Path]:
+    ir = first_existing_path(
+        case,
+        (
+            "llvm_ir",
+            "llvm_ir_path",
+            "ir",
+            "ir_path",
+            "ll",
+            "ll_path",
+            "lowered_ir",
+        ),
+    )
+    if ir is not None:
+        return "llvm-ir", ir
+    mlir = first_existing_path(
+        case,
+        (
+            "mlir",
+            "mlir_path",
+            "source",
+            "source_path",
+            "kernel_mlir",
+            "opentile_mlir",
+        ),
+    )
+    if mlir is not None:
+        return "mlir", mlir
+    rel = first_string(
+        case,
+        (
+            "mlir",
+            "mlir_path",
+            "source",
+            "source_path",
+            "kernel_mlir",
+            "opentile_mlir",
+        ),
+    )
+    if rel is not None:
+        candidate = (opentileas_repo / rel).resolve()
+        if candidate.exists():
+            return "mlir", candidate
+    raise RuntimeError("case does not provide an existing MLIR or LLVM IR path")
+
+
+def preflight_case(
+    oracle: Any,
+    case: dict[str, Any],
+    index: int,
+    opentileas_repo: Path,
+    opentileas_build_dir: Path,
+    tmp_dir: Path,
+) -> dict[str, Any]:
+    name = case_name(case, index)
+    sim_status = simulator_status(case)
+    started = time.perf_counter()
+    lowered_ir: str | None = None
+    source_kind: str | None = None
+    source_path: str | None = None
+    intrinsics: list[str] = []
+    unsupported: list[str] = []
+    stderr_tail = ""
+    returncode: int | None = None
+
+    try:
+        source_kind, source = resolve_source(case, opentileas_repo)
+        source_path = str(source)
+        if source_kind == "llvm-ir":
+            lowered = source
+            lower_returncode = 0
+            lower_stderr = ""
+        else:
+            lowered, lower_result = oracle.lower_opentile_case(
+                opentileas_repo,
+                opentileas_build_dir,
+                source,
+                case.get("target", "dav-351x"),
+                case.get("fusion_mode", "no_fuse"),
+                tmp_dir / oracle.safe_slug(name),
+            )
+            lower_returncode = lower_result.returncode
+            lower_stderr = lower_result.stderr
+        lowered_ir = str(lowered)
+        text = lowered.read_text(encoding="utf-8", errors="ignore")
+        found = oracle.extract_hivm_intrinsics(text)
+        intrinsics = sorted(found)
+        unsupported = sorted(found - oracle.ASC_MODEL_SUPPORTED_INTRINSICS)
+        returncode = lower_returncode
+        if lower_returncode != 0:
+            asc_status = "lower_error"
+            stderr_tail = oracle.tail(lower_stderr)
+        elif unsupported:
+            asc_status = "static_unsupported"
+            stderr_tail = "unsupported intrinsics: " + ", ".join(unsupported[:24])
+            if len(unsupported) > 24:
+                stderr_tail += f"\n... {len(unsupported) - 24} more unsupported intrinsics"
+        else:
+            asc_status = "pass"
+    except Exception as exc:
+        asc_status = "error"
+        stderr_tail = str(exc)
+
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    asc_reject = asc_status in oracle.ASC_REJECT_STATUSES
+    sim_failure = is_simulator_failure(sim_status)
+    return {
+        "name": name,
+        "source_kind": source_kind,
+        "source_path": source_path,
+        "lowered_ir": lowered_ir,
+        "simulator_status": sim_status,
+        "simulator_failure": sim_failure,
+        "asc_status": asc_status,
+        "asc_reject": asc_reject,
+        "caught": bool(sim_failure and asc_reject),
+        "unexpected": bool(sim_failure and not asc_reject),
+        "elapsed_ms": elapsed_ms,
+        "returncode": returncode,
+        "intrinsic_count": len(intrinsics),
+        "unsupported_intrinsics": unsupported,
+        "stderr_tail": stderr_tail,
+    }
+
+
+def print_report(results: list[dict[str, Any]]) -> None:
+    for item in results:
+        marker = "CAUGHT" if item["caught"] else ("MISS" if item["unexpected"] else "INFO")
+        print(
+            f"[{marker}] {item['name']}: sim={item['simulator_status']} "
+            f"asc={item['asc_status']} time={item['elapsed_ms']:.2f}ms"
+        )
+        if item.get("stderr_tail"):
+            for line in str(item["stderr_tail"]).splitlines()[:4]:
+                print(f"  {line}")
+    failures = [item for item in results if item["unexpected"]]
+    caught = [item for item in results if item["caught"]]
+    print(f"summary: caught={len(caught)} missed={len(failures)} total={len(results)}")
+
+
+def main(argv: list[str]) -> int:
+    repo = Path(__file__).resolve().parents[2]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("manifest", type=Path)
+    parser.add_argument("--opentileas-repo", type=Path, default=repo.parent / "OpenTileAS")
+    parser.add_argument(
+        "--opentileas-build-dir",
+        type=Path,
+        default=(repo.parent / "OpenTileAS" / "build"),
+    )
+    parser.add_argument("--report", type=Path)
+    args = parser.parse_args(argv)
+
+    oracle = load_oracle_module(repo)
+    manifest_path = args.manifest.expanduser().resolve()
+    manifest = load_json(manifest_path)
+    cases = iter_cases(manifest)
+    if not cases:
+        raise SystemExit(f"no cases found in manifest: {manifest_path}")
+
+    tmp_dir = manifest_path.parent / ".asc-preflight"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    results = [
+        preflight_case(
+            oracle,
+            case,
+            index,
+            args.opentileas_repo.expanduser().resolve(),
+            args.opentileas_build_dir.expanduser().resolve(),
+            tmp_dir,
+        )
+        for index, case in enumerate(cases)
+    ]
+    print_report(results)
+    if args.report:
+        args.report.expanduser().resolve().write_text(
+            json.dumps({"manifest": str(manifest_path), "results": results}, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+    return 1 if any(item["unexpected"] for item in results) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
