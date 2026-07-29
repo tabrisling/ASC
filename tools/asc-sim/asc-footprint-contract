@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""Check OpenTile masked memory footprints against lowered NPU footprints.
+
+This is a lightweight cross-layer contract checker. It is intentionally narrow
+today: it targets kernels where OpenTile performs vector masked load/store over
+an iota vector and the NPU lowering materializes fixed-width
+memref.reinterpret_cast regions. The first regression target is padded_copy with
+NUM_COLUMNS=129, BLOCK_X=128, f16.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+DTYPE_BYTES = {
+    "f16": 2,
+    "bf16": 2,
+    "i16": 2,
+    "f32": 4,
+    "i32": 4,
+    "i64": 8,
+    "i8": 1,
+}
+
+
+class ContractError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class OpenTileFootprint:
+    iteration: int
+    offset_start: int
+    vector_width: int
+    active_lanes: int
+    logical_columns: int
+
+
+@dataclass(frozen=True)
+class LoweredFootprint:
+    index: int
+    kind: str
+    width: int
+    dtype: str
+    source_line: int
+
+
+def read_text(path: Path) -> str:
+    return path.expanduser().resolve().read_text(encoding="utf-8", errors="ignore")
+
+
+def parse_first_int(pattern: str, text: str, name: str) -> int:
+    match = re.search(pattern, text)
+    if not match:
+        raise ContractError(f"cannot infer {name}")
+    return int(match.group(1))
+
+
+def infer_opentile_vector_width(text: str) -> int:
+    return parse_first_int(r"iota\s*:\s*!open_tile\.tile<(\d+)x", text, "OpenTile vector width")
+
+
+def infer_opentile_loop_count(text: str) -> int:
+    match = re.search(
+        r"for\s+%[-A-Za-z0-9_.$]+\s*=\s+%[-A-Za-z0-9_.$]+\s+to\s+%[-A-Za-z0-9_.$]+"
+        r"\s+step\s+%[-A-Za-z0-9_.$]+",
+        text,
+    )
+    if not match:
+        return 1
+    # Prefer the exact padded_copy constant: constant <i32: 2>.
+    return parse_first_int(r"constant\s+<i32:\s*(\d+)>\s*:\s*!open_tile\.tile<i32>", text, "OpenTile loop count")
+
+
+def parse_opentile_i32_constants(text: str) -> dict[str, int]:
+    constants: dict[str, int] = {}
+    for match in re.finditer(
+        r"(?P<name>%[-A-Za-z0-9_.$]+)\s*=\s*constant\s+<i32:\s*(?P<value>-?\d+)>"
+        r"\s*:\s*!open_tile\.tile(?:<\d+x|<)i32>",
+        text,
+    ):
+        constants[match.group("name")] = int(match.group("value"))
+    return constants
+
+
+def infer_opentile_mask_bound(text: str) -> int | None:
+    constants = parse_opentile_i32_constants(text)
+    for match in re.finditer(
+        r"cmpi\s+less_than\s+%[-A-Za-z0-9_.$]+,\s+(?P<bound>%[-A-Za-z0-9_.$]+),\s+signed"
+        r"\s*:\s*!open_tile\.tile<\d+xi32>\s*->\s*!open_tile\.tile<\d+xi1>",
+        text,
+    ):
+        bound = constants.get(match.group("bound"))
+        if bound is not None:
+            return bound
+    return None
+
+
+def opentile_has_masked_memory(text: str) -> bool:
+    return bool(re.search(r"load_ptr_tko\s+weak\s+[^:\n]+,\s*%[-A-Za-z0-9_.$]+", text)) and bool(
+        re.search(r"store_ptr_tko\s+weak\s+[^:\n]+,\s*%[-A-Za-z0-9_.$]+", text)
+    )
+
+
+def compute_opentile_footprints(
+    text: str,
+    logical_columns: int,
+    block_x: int | None,
+    loop_count: int | None,
+) -> list[OpenTileFootprint]:
+    if not opentile_has_masked_memory(text):
+        raise ContractError("OpenTile IR does not contain masked load_ptr_tko/store_ptr_tko")
+    mask_bound = infer_opentile_mask_bound(text)
+    if mask_bound is not None and mask_bound != logical_columns:
+        raise ContractError(
+            f"--num-columns={logical_columns} does not match OpenTile mask bound {mask_bound}"
+        )
+    vector_width = infer_opentile_vector_width(text)
+    step = block_x or vector_width
+    loops = loop_count or ((logical_columns + step - 1) // step)
+    footprints: list[OpenTileFootprint] = []
+    for iteration in range(loops):
+        start = iteration * step
+        active = max(0, min(vector_width, logical_columns - start))
+        footprints.append(
+            OpenTileFootprint(
+                iteration=iteration,
+                offset_start=start,
+                vector_width=vector_width,
+                active_lanes=active,
+                logical_columns=logical_columns,
+            )
+        )
+    return footprints
+
+
+def line_number(text: str, offset: int) -> int:
+    return text.count("\n", 0, offset) + 1
+
+
+def parse_npu_reinterpret_footprints(text: str) -> list[LoweredFootprint]:
+    pattern = re.compile(
+        r"(?P<lhs>%[-A-Za-z0-9_.$]+)\s*=\s*memref\.reinterpret_cast\s+"
+        r"(?P<arg>%arg\d+)\s+to\s+offset:\s*\[[^\]]+\],\s*sizes:\s*\[(?P<size>\d+)\],"
+        r"\s*strides:\s*\[[^\]]+\]\s*:\s*memref<\?x(?P<dtype>[^>]+)>"
+    )
+    tensor_uses = set(re.findall(r"bufferization\.to_tensor\s+(%[-A-Za-z0-9_.$]+)\b", text))
+    destination_uses = set(
+        re.findall(r"bufferization\.materialize_in_destination\s+.+?\s+in\s+(?:writable\s+)?(%[-A-Za-z0-9_.$]+)\b", text)
+    )
+    footprints: list[LoweredFootprint] = []
+    for index, match in enumerate(pattern.finditer(text)):
+        lhs = match.group("lhs")
+        if lhs in tensor_uses and lhs in destination_uses:
+            kind = "load+store"
+        elif lhs in tensor_uses:
+            kind = "load"
+        elif lhs in destination_uses:
+            kind = "store"
+        else:
+            kind = "unknown"
+        footprints.append(
+            LoweredFootprint(
+                index=index,
+                kind=kind,
+                width=int(match.group("size")),
+                dtype=match.group("dtype").strip(),
+                source_line=line_number(text, match.start()),
+            )
+        )
+    if not footprints:
+        raise ContractError("NPU IR does not contain memref.reinterpret_cast footprints")
+    return footprints
+
+
+def check_contract(
+    opentile_footprints: list[OpenTileFootprint],
+    lowered_footprints: list[LoweredFootprint],
+    dtype: str,
+) -> list[dict[str, Any]]:
+    lowered_widths = [item.width for item in lowered_footprints]
+    lowered_width = max(lowered_widths)
+    dtype_bytes = DTYPE_BYTES.get(dtype)
+    if dtype_bytes is None:
+        raise ContractError(f"unsupported dtype {dtype!r}")
+
+    results: list[dict[str, Any]] = []
+    for footprint in opentile_footprints:
+        extra_lanes = max(0, lowered_width - footprint.active_lanes)
+        overflow_start = (
+            footprint.offset_start + footprint.active_lanes
+            if extra_lanes
+            else None
+        )
+        overflow_end = (
+            footprint.offset_start + lowered_width - 1
+            if extra_lanes
+            else None
+        )
+        results.append(
+            {
+                "iteration": footprint.iteration,
+                "offset_start": footprint.offset_start,
+                "logical_columns": footprint.logical_columns,
+                "opentile_active_lanes": footprint.active_lanes,
+                "lowered_width": lowered_width,
+                "extra_lanes": extra_lanes,
+                "extra_bytes": extra_lanes * dtype_bytes,
+                "overflow_columns": (
+                    [overflow_start, overflow_end]
+                    if overflow_start is not None and overflow_end is not None
+                    else []
+                ),
+                "ok": extra_lanes == 0,
+            }
+        )
+    return results
+
+
+def print_report(results: list[dict[str, Any]], lowered: list[LoweredFootprint]) -> None:
+    for item in results:
+        marker = "OK" if item["ok"] else "FAIL"
+        print(
+            f"[{marker}] iter={item['iteration']} offset={item['offset_start']} "
+            f"active={item['opentile_active_lanes']} lowered={item['lowered_width']} "
+            f"extra_lanes={item['extra_lanes']}"
+        )
+        if not item["ok"]:
+            lo, hi = item["overflow_columns"]
+            print(
+                f"  lowered footprint covers logical columns {lo}..{hi} outside "
+                f"[0, {item['logical_columns'] - 1}] ({item['extra_bytes']} bytes)"
+            )
+    print("[lowered-footprints]")
+    for item in lowered:
+        print(
+            f"  #{item.index} {item.kind} width={item.width} dtype={item.dtype} "
+            f"line={item.source_line}"
+        )
+    failures = [item for item in results if not item["ok"]]
+    print(f"summary: {len(results) - len(failures)}/{len(results)} iterations satisfy contract")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--opentile", type=Path, required=True)
+    parser.add_argument("--npu", type=Path, required=True)
+    parser.add_argument("--num-columns", type=int, required=True)
+    parser.add_argument("--block-x", type=int)
+    parser.add_argument("--loop-count", type=int)
+    parser.add_argument("--dtype", default="f16")
+    parser.add_argument("--report", type=Path)
+    args = parser.parse_args(argv)
+
+    started = time.perf_counter()
+    opentile_text = read_text(args.opentile)
+    npu_text = read_text(args.npu)
+    opentile_footprints = compute_opentile_footprints(
+        opentile_text,
+        args.num_columns,
+        args.block_x,
+        args.loop_count,
+    )
+    lowered_footprints = parse_npu_reinterpret_footprints(npu_text)
+    results = check_contract(opentile_footprints, lowered_footprints, args.dtype)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    print_report(results, lowered_footprints)
+    print(f"elapsed_ms: {elapsed_ms:.2f}")
+    if args.report:
+        args.report.expanduser().resolve().write_text(
+            json.dumps(
+                {
+                    "opentile": str(args.opentile.expanduser().resolve()),
+                    "npu": str(args.npu.expanduser().resolve()),
+                    "num_columns": args.num_columns,
+                    "block_x": args.block_x,
+                    "dtype": args.dtype,
+                    "elapsed_ms": elapsed_ms,
+                    "lowered_footprints": [item.__dict__ for item in lowered_footprints],
+                    "results": results,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    return 1 if any(not item["ok"] for item in results) else 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except ContractError as exc:
+        print(f"contract-error: {exc}", file=sys.stderr)
+        raise SystemExit(2)
