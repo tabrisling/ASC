@@ -105,6 +105,10 @@ SCALAR_VECTOR_OPS = {
     ),
 }
 
+SCALAR_I32_VECTOR_OPS = {
+    "@llvm.hivm.vadds.s.x.v64i32": ("vadds", "x", lambda a, s: u32(int(a) + int(s))),
+}
+
 VECTOR_VECTOR_SCALAR_OPS = {
     "@llvm.hivm.vaxpy.m.v64f32": (
         "vaxpy",
@@ -519,6 +523,15 @@ def bf16_to_le_bytes(value: int | float) -> list[int]:
 def le_bytes_to_u32(values: list[int]) -> int:
     if len(values) != I32_BYTES:
         raise SimError(f"expected {I32_BYTES} bytes for u32 packing, got {len(values)}")
+    raw = 0
+    for idx, value in enumerate(values):
+        raw |= (int(value) & 0xFF) << (idx * 8)
+    return raw
+
+
+def le_bytes_to_u64(values: list[int]) -> int:
+    if len(values) != I64_BYTES:
+        raise SimError(f"expected {I64_BYTES} bytes for u64 packing, got {len(values)}")
     raw = 0
     for idx, value in enumerate(values):
         raw |= (int(value) & 0xFF) << (idx * 8)
@@ -1094,11 +1107,11 @@ class DavVAddSim:
         return instructions, labels
 
     def _execute_branch(self, line: str) -> str | None:
-        unconditional = re.match(r"br\s+label\s+%?([A-Za-z0-9_.$-]+)$", line)
+        unconditional = re.match(r"br\s+label\s+%?([A-Za-z0-9_.$-]+)(?:,\s+!.*)?$", line)
         if unconditional:
             return unconditional.group(1)
         conditional = re.match(
-            r"br\s+i1\s+([^,]+),\s+label\s+%?([A-Za-z0-9_.$-]+),\s+label\s+%?([A-Za-z0-9_.$-]+)$",
+            r"br\s+i1\s+([^,]+),\s+label\s+%?([A-Za-z0-9_.$-]+),\s+label\s+%?([A-Za-z0-9_.$-]+)(?:,\s+!.*)?$",
             line,
         )
         if conditional:
@@ -1260,6 +1273,13 @@ class DavVAddSim:
             self.trace.append(f"SET.FLAG.IMM{flag}")
             return
 
+        if name in ("@llvm.hivm.SET.INTRA.BLOCKI.mode", "@llvm.hivm.WAIT.INTRA.BLOCKI.mode"):
+            if len(args) != 2:
+                raise SimError(f"{name}: expected 2 arguments, got {len(args)}")
+            event = tuple(self._as_int(arg, f"{name} argument") for arg in args)
+            self.trace.append(f"{name.rsplit('.', 2)[-2]}{event}")
+            return
+
         if name == "@llvm.hivm.WAIT.FLAG.IMM":
             flag = tuple(self._as_int(arg, "WAIT.FLAG.IMM argument") for arg in args)
             if len(flag) != 3:
@@ -1327,9 +1347,18 @@ class DavVAddSim:
             raw_descriptor = self._as_int(args[2], "MOV.UB.TO.OUT descriptor")
             low_count = raw_descriptor & 0xFFFF
             candidate_byte_count = low_count * DMA_V2_LOW_COUNT_BYTES
+            lane_count = (raw_descriptor >> 4) & 0x1FFFFF
+            lane_candidate_byte_count = lane_count * dtype_bytes(dst.dtype)
             dst_available = (len(dst.values) * dtype_bytes(dst.dtype)) - dst_base
             src_available = (len(src.values) * dtype_bytes(src.dtype)) - src_base
             if (
+                raw_descriptor >> 56
+                and lane_count
+                and lane_candidate_byte_count <= dst_available
+                and lane_candidate_byte_count <= src_available
+            ):
+                byte_count = lane_candidate_byte_count
+            elif (
                 src.dtype in ("bf16", "u32", "s32", "u8", "s8")
                 and raw_descriptor >> 56
                 and low_count
@@ -1342,6 +1371,22 @@ class DavVAddSim:
                 f"MOV.UB.TO.OUT UB[{src_base}:{src_base + byte_count}] -> "
                 f"{dst.name}[0:{byte_count}]"
             )
+            return
+
+        if name == "@llvm.hivm.MOV.UB.TO.L1.v310":
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            descriptor = self._as_int(args[2], "MOV.UB.TO.L1 descriptor")
+            if descriptor != 1048592:
+                raise SimError(f"{name}: unsupported descriptor {descriptor}")
+            dst, dst_base = self._resolve_pointer(args[0], "l1", preferred_dtype="u8")
+            src, src_base = self._resolve_pointer(args[1], "ub", preferred_dtype="u8")
+            if src.dtype not in ("u8", "s8") or dst.dtype != "u8":
+                raise SimError(f"{name}: expected byte buffers, got {src.dtype}->{dst.dtype}")
+            byte_count = 512
+            payload = self._read_buffer_bytes(src, src_base, byte_count, "MOV.UB.TO.L1 read")
+            self._write_buffer_bytes(dst, dst_base, payload, "MOV.UB.TO.L1 write")
+            self.trace.append(f"MOV.UB.TO.L1 UB[{src_base}:{src_base + byte_count}] -> L1[{dst_base}:{dst_base + byte_count}]")
             return
 
         if name in (
@@ -1505,7 +1550,7 @@ class DavVAddSim:
                 raise SimError("vldsx1 result is unused")
             if len(args) != 4:
                 raise SimError(f"{name}: expected 4 args, got {len(args)}")
-            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="u32")
+            buf, base_byte = self._resolve_pointer(args[0], "ub", preferred_dtype="s32")
             if buf.dtype not in ("u32", "s32"):
                 raise SimError(f"{name}: expected 32-bit integer UB buffer, got {buf.dtype}")
             byte_offset = self._as_int(args[1], "vldsx1 byte offset")
@@ -2154,6 +2199,36 @@ class DavVAddSim:
             )
             return
 
+        if name == "@llvm.hivm.vci.v64i32":
+            if lhs is None:
+                raise SimError("vci result is unused")
+            if len(args) != 2:
+                raise SimError(f"{name}: expected 2 args, got {len(args)}")
+            base = self._as_int(args[0], "vci base")
+            config = self._as_int(args[1], "vci config")
+            if config != 0:
+                raise SimError(f"{name}: unsupported config {config}")
+            self.values[lhs] = [u32(base + lane) for lane in range(LANES_I32_V64)]
+            self.trace.append(f"{lhs} = vci.v64i32(base={base})")
+            return
+
+        if name in SCALAR_I32_VECTOR_OPS:
+            if lhs is None:
+                raise SimError(f"{SCALAR_I32_VECTOR_OPS[name][0]} result is unused")
+            if len(args) != 3:
+                raise SimError(f"{name}: expected 3 args, got {len(args)}")
+            op_label, mode, op = SCALAR_I32_VECTOR_OPS[name]
+            vec = self._as_u32_vector(args[0], f"{op_label} input")
+            scalar = self._as_int(args[1], f"{op_label} scalar")
+            mask = self._as_mask(args[2], f"{op_label} mask", lanes=LANES_I32_V64)
+            result = [
+                op(value, scalar) if active and value is not None else None
+                for value, active in zip(vec, mask)
+            ]
+            self.values[lhs] = result
+            self.trace.append(f"{lhs} = {op_label}.{mode}.i32({args[0].value}, {scalar}, {args[2].value})")
+            return
+
         if name in VECTOR_VECTOR_SCALAR_OPS:
             if lhs is None:
                 raise SimError(f"{VECTOR_VECTOR_SCALAR_OPS[name][0]} result is unused")
@@ -2452,7 +2527,7 @@ class DavVAddSim:
             if len(args) != 6:
                 raise SimError(f"{name}: expected 6 args, got {len(args)}")
             vec = self._as_u32_vector(args[0], "vstsx1 s32 value", allow_inactive=True)
-            buf, base_byte = self._resolve_pointer(args[1], "ub", preferred_dtype="u32")
+            buf, base_byte = self._resolve_pointer(args[1], "ub", preferred_dtype="s32")
             if buf.dtype not in ("u32", "s32"):
                 raise SimError(f"{name}: expected 32-bit integer UB buffer, got {buf.dtype}")
             byte_offset = self._as_int(args[2], "vstsx1 byte offset")
@@ -3083,6 +3158,58 @@ class DavVAddSim:
             self.trace.append(f"{lhs} = inttoptr(...)")
             return True
 
+        gep = re.match(
+            r"(%[-A-Za-z0-9_.$]+)\s*=\s*getelementptr\s+inbounds\s+"
+            r"(i(?:8|16|32|64)),\s+(ptr(?:\s+addrspace\(\d+\))?\s+%[-A-Za-z0-9_.$]+),\s+i\d+\s+(.+)$",
+            line,
+        )
+        if gep:
+            lhs = gep.group(1)
+            element_type = gep.group(2)
+            ptr = parse_typed_value(gep.group(3))
+            index = self._as_int(parse_typed_value(gep.group(4)), "getelementptr index")
+            element_bytes = {
+                "i8": I8_BYTES,
+                "i16": I16_BYTES,
+                "i32": I32_BYTES,
+                "i64": I64_BYTES,
+            }[element_type]
+            expected_space = "gm" if ptr.addrspace == GM_ADDRSPACE else "ub"
+            buf, byte_offset = self._resolve_pointer(ptr, expected_space)
+            self.values[lhs] = PointerValue(
+                buf.name,
+                ptr.addrspace or GM_ADDRSPACE,
+                byte_offset + index * element_bytes,
+            )
+            self.trace.append(f"{lhs} = gep.{element_type}({buf.name}+{byte_offset}, {index})")
+            return True
+
+        load_int = re.match(
+            r"(%[-A-Za-z0-9_.$]+)\s*=\s*load\s+(i(?:32|64)),\s+"
+            r"ptr(?:\s+addrspace\((\d+)\))?\s+(.+?)(?:,\s+align\s+(\d+))?$",
+            line,
+        )
+        if load_int:
+            lhs = load_int.group(1)
+            integer_type = load_int.group(2)
+            addrspace = int(load_int.group(3)) if load_int.group(3) else GM_ADDRSPACE
+            ptr = parse_typed_value(f"ptr addrspace({addrspace}) {load_int.group(4)}")
+            expected_space = "gm" if addrspace == GM_ADDRSPACE else "ub"
+            preferred_dtype = "s32" if integer_type == "i32" else "u32"
+            buf, byte_offset = self._resolve_pointer(ptr, expected_space, preferred_dtype=preferred_dtype)
+            alignment = int(load_int.group(5)) if load_int.group(5) else 1
+            byte_count = I64_BYTES if integer_type == "i64" else I32_BYTES
+            payload = self._read_buffer_bytes(
+                buf,
+                byte_offset,
+                byte_count,
+                f"load {integer_type}",
+                alignment=alignment,
+            )
+            self.values[lhs] = le_bytes_to_u64(payload) if integer_type == "i64" else le_bytes_to_u32(payload)
+            self.trace.append(f"{lhs} = load.{integer_type}({buf.name}+{byte_offset})")
+            return True
+
         store_i64 = re.match(
             r"store\s+i64\s+(.+?),\s+ptr(?:\s+addrspace\((\d+)\))?\s+(.+?)(?:,\s+align\s+(\d+))?$",
             line,
@@ -3112,7 +3239,7 @@ class DavVAddSim:
             return True
 
         binary = re.match(
-            r"(%[-A-Za-z0-9_.$]+)\s*=\s*(add|sub|mul|and|or|shl)\s+i\d+\s+([^,]+),\s+(.+)$",
+            r"(%[-A-Za-z0-9_.$]+)\s*=\s*(add|sub|mul|sdiv|and|or|shl)\s+i\d+\s+([^,]+),\s+(.+)$",
             line,
         )
         if binary:
@@ -3122,12 +3249,20 @@ class DavVAddSim:
             self.values[lhs] = self._eval_binary(op, left, right, lhs)
             return True
 
-        icmp = re.match(r"(%[-A-Za-z0-9_.$]+)\s*=\s*icmp\s+(sle|slt)\s+i\d+\s+([^,]+),\s+(.+)$", line)
+        icmp = re.match(r"(%[-A-Za-z0-9_.$]+)\s*=\s*icmp\s+(eq|ne|sle|slt|sge|sgt)\s+i\d+\s+([^,]+),\s+(.+)$", line)
         if icmp:
             lhs = icmp.group(1)
+            pred = icmp.group(2)
             left = self._as_int(parse_typed_value(icmp.group(3)), "icmp lhs")
             right = self._as_int(parse_typed_value(icmp.group(4)), "icmp rhs")
-            self.values[lhs] = left <= right if icmp.group(2) == "sle" else left < right
+            self.values[lhs] = {
+                "eq": left == right,
+                "ne": left != right,
+                "sle": left <= right,
+                "slt": left < right,
+                "sge": left >= right,
+                "sgt": left > right,
+            }[pred]
             return True
 
         return False
@@ -3148,10 +3283,14 @@ class DavVAddSim:
         dst_base: int,
     ) -> int:
         raw = self._as_int(descriptor, "MOV.OUT.TO.UB descriptor")
-        low_count = raw & 0xFFFF
-        candidate = low_count * DMA_V2_LOW_COUNT_BYTES
+        lane_count = (raw >> 4) & 0x1FFFFF
+        lane_candidate = lane_count * dtype_bytes(src.dtype)
         src_available = (len(src.values) * dtype_bytes(src.dtype)) - src_base
         dst_available = (len(dst.values) * dtype_bytes(dst.dtype)) - dst_base
+        if raw >> 56 and lane_count and lane_candidate <= src_available and lane_candidate <= dst_available:
+            return lane_candidate
+        low_count = raw & 0xFFFF
+        candidate = low_count * DMA_V2_LOW_COUNT_BYTES
         if raw >> 56 and low_count and candidate <= src_available and candidate <= dst_available:
             return candidate
         return self.dma_bytes
@@ -3188,6 +3327,10 @@ class DavVAddSim:
             return left - right
         if op == "mul":
             return left * right
+        if op == "sdiv":
+            if right == 0:
+                raise SimError(f"{lhs}: signed division by zero")
+            return int(left / right)
         if op == "and":
             return left & right
         if op == "or":
