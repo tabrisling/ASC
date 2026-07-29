@@ -3,9 +3,9 @@
 
 This is a lightweight cross-layer contract checker. It is intentionally narrow
 today: it targets kernels where OpenTile performs vector masked load/store over
-an iota vector and the NPU lowering materializes fixed-width
-memref.reinterpret_cast regions. The first regression target is padded_copy with
-NUM_COLUMNS=129, BLOCK_X=128, f16.
+an iota vector and the NPU lowering materializes memref.reinterpret_cast regions
+whose sizes are either constants or clamp-style dynamic sizes. The first
+regression target is padded_copy with NUM_COLUMNS=129, BLOCK_X=128, f16.
 """
 
 from __future__ import annotations
@@ -48,9 +48,14 @@ class OpenTileFootprint:
 class LoweredFootprint:
     index: int
     kind: str
-    width: int
+    widths: tuple[int, ...]
     dtype: str
     source_line: int
+    size_expr: str
+
+    @property
+    def width(self) -> int:
+        return max(self.widths)
 
 
 def read_text(path: Path) -> str:
@@ -146,19 +151,147 @@ def line_number(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
-def parse_npu_reinterpret_footprints(text: str) -> list[LoweredFootprint]:
+def parse_npu_scalar_constants(text: str) -> dict[str, int]:
+    constants: dict[str, int] = {}
+    for match in re.finditer(
+        r"(?P<name>%[-A-Za-z0-9_.$]+)\s*=\s*arith\.constant\s+"
+        r"(?P<value>-?\d+)\s*:\s*(?:i\d+|index)",
+        text,
+    ):
+        constants[match.group("name")] = int(match.group("value"))
+    return constants
+
+
+def resolve_alias(name: str, aliases: dict[str, str]) -> str:
+    seen: set[str] = set()
+    while name in aliases and name not in seen:
+        seen.add(name)
+        name = aliases[name]
+    return name
+
+
+def parse_memref_cast_aliases(text: str) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for match in re.finditer(
+        r"(?P<dst>%[-A-Za-z0-9_.$]+)\s*=\s*memref\.cast\s+"
+        r"(?P<src>%[-A-Za-z0-9_.$]+)\s*:",
+        text,
+    ):
+        aliases[match.group("dst")] = match.group("src")
+    return aliases
+
+
+def parse_npu_tensor_uses(text: str, aliases: dict[str, str]) -> set[str]:
+    return {
+        resolve_alias(match.group(1), aliases)
+        for match in re.finditer(r"bufferization\.to_tensor\s+(%[-A-Za-z0-9_.$]+)\b", text)
+    }
+
+
+def parse_npu_destination_uses(text: str, aliases: dict[str, str]) -> set[str]:
+    return {
+        resolve_alias(match.group(1), aliases)
+        for match in re.finditer(
+            r"bufferization\.materialize_in_destination\s+.+?\s+in\s+"
+            r"(?:writable\s+)?(%[-A-Za-z0-9_.$]+)\b",
+            text,
+        )
+    }
+
+
+def npu_iteration_env(
+    text: str,
+    constants: dict[str, int],
+    footprint: OpenTileFootprint,
+) -> dict[str, int]:
+    env = dict(constants)
+    for match in re.finditer(
+        r"(?P<name>%[-A-Za-z0-9_.$]+)\s*=\s*tensor\.extract\s+%arg7"
+        r"\[(?P<idx>%[-A-Za-z0-9_.$]+)\]\s*:\s*tensor<\d+xi32>",
+        text,
+    ):
+        lane = env.get(match.group("idx"))
+        if lane is None:
+            continue
+        env[match.group("name")] = footprint.offset_start + lane
+
+    changed = True
+    while changed:
+        changed = False
+        for match in re.finditer(
+            r"(?P<name>%[-A-Za-z0-9_.$]+)\s*=\s*arith\."
+            r"(?P<op>subi|addi|maxsi|minsi)\s+"
+            r"(?P<a>%[-A-Za-z0-9_.$]+),\s+(?P<b>%[-A-Za-z0-9_.$]+)\s*:\s*(?:i\d+|index)",
+            text,
+        ):
+            name = match.group("name")
+            if name in env:
+                continue
+            a = env.get(match.group("a"))
+            b = env.get(match.group("b"))
+            if a is None or b is None:
+                continue
+            op = match.group("op")
+            if op == "subi":
+                value = a - b
+            elif op == "addi":
+                value = a + b
+            elif op == "maxsi":
+                value = max(a, b)
+            else:
+                value = min(a, b)
+            env[name] = value
+            changed = True
+        for match in re.finditer(
+            r"(?P<name>%[-A-Za-z0-9_.$]+)\s*=\s*arith\.index_cast\s+"
+            r"(?P<src>%[-A-Za-z0-9_.$]+)\s*:\s*(?:i\d+|index)\s+to\s+(?:i\d+|index)",
+            text,
+        ):
+            name = match.group("name")
+            src_value = env.get(match.group("src"))
+            if name not in env and src_value is not None:
+                env[name] = src_value
+                changed = True
+    return env
+
+
+def evaluate_npu_size_expr(
+    expr: str,
+    text: str,
+    constants: dict[str, int],
+    opentile_footprints: list[OpenTileFootprint],
+) -> tuple[int, ...]:
+    expr = expr.strip()
+    if re.fullmatch(r"-?\d+", expr):
+        return (int(expr),) * len(opentile_footprints)
+    if not expr.startswith("%"):
+        raise ContractError(f"unsupported NPU reinterpret_cast size expression: {expr}")
+    widths: list[int] = []
+    for footprint in opentile_footprints:
+        env = npu_iteration_env(text, constants, footprint)
+        if expr not in env:
+            raise ContractError(f"cannot evaluate NPU dynamic size {expr}")
+        widths.append(env[expr])
+    return tuple(widths)
+
+
+def parse_npu_reinterpret_footprints(
+    text: str,
+    opentile_footprints: list[OpenTileFootprint],
+) -> list[LoweredFootprint]:
     pattern = re.compile(
         r"(?P<lhs>%[-A-Za-z0-9_.$]+)\s*=\s*memref\.reinterpret_cast\s+"
-        r"(?P<arg>%arg\d+)\s+to\s+offset:\s*\[[^\]]+\],\s*sizes:\s*\[(?P<size>\d+)\],"
+        r"(?P<arg>%arg\d+)\s+to\s+offset:\s*\[[^\]]+\],\s*sizes:\s*\[(?P<size>[^\]]+)\],"
         r"\s*strides:\s*\[[^\]]+\]\s*:\s*memref<\?x(?P<dtype>[^>]+)>"
     )
-    tensor_uses = set(re.findall(r"bufferization\.to_tensor\s+(%[-A-Za-z0-9_.$]+)\b", text))
-    destination_uses = set(
-        re.findall(r"bufferization\.materialize_in_destination\s+.+?\s+in\s+(?:writable\s+)?(%[-A-Za-z0-9_.$]+)\b", text)
-    )
+    constants = parse_npu_scalar_constants(text)
+    aliases = parse_memref_cast_aliases(text)
+    tensor_uses = parse_npu_tensor_uses(text, aliases)
+    destination_uses = parse_npu_destination_uses(text, aliases)
     footprints: list[LoweredFootprint] = []
     for index, match in enumerate(pattern.finditer(text)):
         lhs = match.group("lhs")
+        size_expr = match.group("size").strip()
         if lhs in tensor_uses and lhs in destination_uses:
             kind = "load+store"
         elif lhs in tensor_uses:
@@ -171,9 +304,15 @@ def parse_npu_reinterpret_footprints(text: str) -> list[LoweredFootprint]:
             LoweredFootprint(
                 index=index,
                 kind=kind,
-                width=int(match.group("size")),
+                widths=evaluate_npu_size_expr(
+                    size_expr,
+                    text,
+                    constants,
+                    opentile_footprints,
+                ),
                 dtype=match.group("dtype").strip(),
                 source_line=line_number(text, match.start()),
+                size_expr=size_expr,
             )
         )
     if not footprints:
@@ -186,14 +325,17 @@ def check_contract(
     lowered_footprints: list[LoweredFootprint],
     dtype: str,
 ) -> list[dict[str, Any]]:
-    lowered_widths = [item.width for item in lowered_footprints]
-    lowered_width = max(lowered_widths)
     dtype_bytes = DTYPE_BYTES.get(dtype)
     if dtype_bytes is None:
         raise ContractError(f"unsupported dtype {dtype!r}")
 
     results: list[dict[str, Any]] = []
     for footprint in opentile_footprints:
+        lowered_width = max(
+            item.widths[footprint.iteration]
+            for item in lowered_footprints
+            if footprint.iteration < len(item.widths)
+        )
         extra_lanes = max(0, lowered_width - footprint.active_lanes)
         overflow_start = (
             footprint.offset_start + footprint.active_lanes
@@ -212,6 +354,11 @@ def check_contract(
                 "logical_columns": footprint.logical_columns,
                 "opentile_active_lanes": footprint.active_lanes,
                 "lowered_width": lowered_width,
+                "lowered_widths": {
+                    f"{item.kind}#{item.index}": item.widths[footprint.iteration]
+                    for item in lowered_footprints
+                    if footprint.iteration < len(item.widths)
+                },
                 "extra_lanes": extra_lanes,
                 "extra_bytes": extra_lanes * dtype_bytes,
                 "overflow_columns": (
@@ -242,8 +389,8 @@ def print_report(results: list[dict[str, Any]], lowered: list[LoweredFootprint])
     print("[lowered-footprints]")
     for item in lowered:
         print(
-            f"  #{item.index} {item.kind} width={item.width} dtype={item.dtype} "
-            f"line={item.source_line}"
+            f"  #{item.index} {item.kind} widths={list(item.widths)} "
+            f"size={item.size_expr} dtype={item.dtype} line={item.source_line}"
         )
     failures = [item for item in results if not item["ok"]]
     print(f"summary: {len(results) - len(failures)}/{len(results)} iterations satisfy contract")
@@ -269,7 +416,7 @@ def main(argv: list[str]) -> int:
         args.block_x,
         args.loop_count,
     )
-    lowered_footprints = parse_npu_reinterpret_footprints(npu_text)
+    lowered_footprints = parse_npu_reinterpret_footprints(npu_text, opentile_footprints)
     results = check_contract(opentile_footprints, lowered_footprints, args.dtype)
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     print_report(results, lowered_footprints)
